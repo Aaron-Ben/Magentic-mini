@@ -1,11 +1,12 @@
 use axum::{routing::{get, post}, Router};
 
-use crate::api::handlers::{create_task, get_task, AppState};
+use crate::api::handlers::{create_task, get_task, task_stream, AppState};
 
 pub fn build_router() -> Router<AppState> {
 	Router::new()
 		.route("/tasks", post(create_task))
 		.route("/tasks/:task_id", get(get_task))
+		.route("/tasks/:task_id/stream", get(task_stream))
 		.route("/health", get(|| async { "ok" }))
 }
 
