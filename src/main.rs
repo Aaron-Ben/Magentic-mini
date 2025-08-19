@@ -1,23 +1,33 @@
-use fantoccini::{ClientBuilder, Locator};
+mod api;
+mod browser;
+mod manager;
+mod types;
 
-// let's set up the sequence of steps we want the browser to take
+use std::net::SocketAddr;
+
+use api::{handlers::AppState, routes::build_router};
+use axum::{Router};
+use manager::task_manager::TaskManager;
+use tracing_subscriber::{fmt, EnvFilter};
+
 #[tokio::main]
-async fn main() -> Result<(), fantoccini::error::CmdError> {
-    let c = ClientBuilder::native().connect("http://localhost:4444").await.expect("failed to connect to WebDriver");
+async fn main() {
+	// 日志
+	let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+	fmt().with_env_filter(filter).init();
 
-    // first, go to the Wikipedia page for Foobar
-    c.goto("https://en.wikipedia.org/wiki/Foobar").await?;
-    let url = c.current_url().await?;
-    assert_eq!(url.as_ref(), "https://en.wikipedia.org/wiki/Foobar");
+	// 依赖
+	let webdriver_url = std::env::var("WEBDRIVER_URL").unwrap_or_else(|_| "http://localhost:4444".to_string());
+	let task_manager = TaskManager::new(webdriver_url);
+	let state = AppState { task_manager };
 
-    // click "Foo (disambiguation)"
-    c.find(Locator::Css(".mw-disambig")).await?.click().await?;
+	// 路由
+	let app: Router = build_router().with_state(state);
 
-    // click "Foo Lake"
-    c.find(Locator::LinkText("Foo Lake")).await?.click().await?;
-
-    let url = c.current_url().await?;
-    assert_eq!(url.as_ref(), "https://en.wikipedia.org/wiki/Foo_Lake");
-
-    c.close().await
+	let addr: SocketAddr = "0.0.0.0:3000".parse().unwrap();
+	tracing::info!("listening on http://{}", addr);
+	axum::Server::bind(&addr)
+		.serve(app.into_make_service())
+		.await
+		.unwrap();
 }
