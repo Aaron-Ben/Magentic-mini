@@ -1,33 +1,31 @@
-mod api;
-mod browser;
-mod manager;
 mod types;
+mod agents;
+mod llm;
+mod cli;
 
-use std::net::SocketAddr;
-
-use api::{handlers::AppState, routes::build_router};
-use axum::{Router};
-use manager::task_manager::TaskManager;
-use tracing_subscriber::{fmt, EnvFilter};
+use cli::CliInterface;
+use anyhow::Result;
+use tracing_subscriber;
 
 #[tokio::main]
-async fn main() {
-	// 日志
-	let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-	fmt().with_env_filter(filter).init();
-
-	// 依赖
-	let webdriver_url = std::env::var("WEBDRIVER_URL").unwrap_or_else(|_| "http://localhost:4444".to_string());
-	let task_manager = TaskManager::new(webdriver_url);
-	let state = AppState { task_manager };
-
-	// 路由
-	let app: Router = build_router().with_state(state);
-
-	let addr: SocketAddr = "0.0.0.0:3000".parse().unwrap();
-	tracing::info!("listening on http://{}", addr);
-	axum::Server::bind(&addr)
-		.serve(app.into_make_service())
-		.await
-		.unwrap();
+async fn main() -> Result<()> {
+    // 加载 .env 文件
+    dotenv::dotenv().ok();
+    
+    // 初始化日志
+    tracing_subscriber::fmt::init();
+    
+    // 检查环境变量
+    if std::env::var("DASHSCOPE_API_KEY").is_err() {
+        eprintln!("❌ Error: DASHSCOPE_API_KEY environment variable is required");
+        eprintln!("Please set it with: export DASHSCOPE_API_KEY=your_api_key");
+        eprintln!("Get your API key from: https://dashscope.console.aliyun.com/");
+        std::process::exit(1);
+    }
+    
+    // 启动 CLI
+    let cli = CliInterface::new()?;
+    cli.run().await?;
+    
+    Ok(())
 }
