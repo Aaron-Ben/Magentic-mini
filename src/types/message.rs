@@ -1,28 +1,32 @@
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentMessage {
-    pub id: Uuid,
+pub enum ChatMessage {
+    TextMessage {
+        content: String,
+        source: String,
+        timestamp: Option<String>,
+    },
+    MultiModalMessage {
+        text_content: String,
+        source: String,
+        media_content: Option<String>,
+        timestamp: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmMessage {
+    pub role: String,
     pub content: String,
-    pub message_type: MessageType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum MessageType {
-    UserInput,
-    PlanRequest,
-    StepExecution,
-    StepResult,
-    Error,
+pub struct Choice {
+    pub message: LlmMessage,
 }
 
-impl AgentMessage {
-    pub fn new(content: String, message_type: MessageType) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            content,
-            message_type,
-        }
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmResponse {
+    pub choices: Vec<Choice>,
 }
