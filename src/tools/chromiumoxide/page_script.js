@@ -612,12 +612,173 @@ var WebSurfer = WebSurfer || (function () {
         return textInView;
     };
 
+    /**
+     * Converts HTML content to simplified Markdown format
+     * @returns {string} Markdown representation of the page
+     */
+    let getPageMarkdown = function() {
+        try {
+            // 简化的 HTML 到 Markdown 转换
+            let content = document.body.cloneNode(true);
+            
+            // 移除脚本和样式标签
+            content.querySelectorAll('script, style, nav, footer, aside').forEach(el => el.remove());
+            
+            let markdown = '';
+            
+            function processElement(element) {
+                if (!element || !element.tagName) {
+                    return '';
+                }
+                
+                const tagName = element.tagName.toLowerCase();
+                const text = element.textContent ? element.textContent.trim() : '';
+                
+                switch (tagName) {
+                    case 'h1':
+                        return text ? `# ${text}\n\n` : '';
+                    case 'h2':
+                        return text ? `## ${text}\n\n` : '';
+                    case 'h3':
+                        return text ? `### ${text}\n\n` : '';
+                    case 'h4':
+                        return text ? `#### ${text}\n\n` : '';
+                    case 'h5':
+                        return text ? `##### ${text}\n\n` : '';
+                    case 'h6':
+                        return text ? `###### ${text}\n\n` : '';
+                    case 'p':
+                        return text ? `${text}\n\n` : '';
+                    case 'a':
+                        const href = element.getAttribute('href');
+                        return href && text ? `[${text}](${href})` : text;
+                    case 'strong':
+                    case 'b':
+                        return text ? `**${text}**` : '';
+                    case 'em':
+                    case 'i':
+                        return text ? `*${text}*` : '';
+                    case 'code':
+                        return text ? `\`${text}\`` : '';
+                    case 'pre':
+                        return text ? `\`\`\`\n${text}\n\`\`\`\n\n` : '';
+                    case 'ul':
+                    case 'ol':
+                        let listItems = '';
+                        const listElements = element.querySelectorAll('li');
+                        for (let i = 0; i < listElements.length; i++) {
+                            const li = listElements[i];
+                            const prefix = tagName === 'ol' ? `${i + 1}. ` : '- ';
+                            const liText = li.textContent ? li.textContent.trim() : '';
+                            if (liText) {
+                                listItems += `${prefix}${liText}\n`;
+                            }
+                        }
+                        return listItems ? `${listItems}\n` : '';
+                    case 'blockquote':
+                        return text ? `> ${text}\n\n` : '';
+                    case 'br':
+                        return '\n';
+                    case 'hr':
+                        return '---\n\n';
+                    case 'div':
+                    case 'section':
+                    case 'article':
+                        // 对于容器元素，不直接处理，让递归处理子元素
+                        return null;
+                    default:
+                        return null; // 让递归处理
+                }
+            }
+            
+            function walkNodes(node) {
+                if (!node) return;
+                
+                if (node.nodeType === Node.TEXT_NODE) {
+                    const text = node.textContent ? node.textContent.trim() : '';
+                    if (text && text.length > 0) {
+                        // 避免添加重复的空格
+                        if (markdown && !markdown.endsWith(' ') && !markdown.endsWith('\n')) {
+                            markdown += ' ';
+                        }
+                        markdown += text;
+                    }
+                } else if (node.nodeType === Node.ELEMENT_NODE) {
+                    const processed = processElement(node);
+                    
+                    if (processed !== null && processed !== undefined) {
+                        // 直接使用处理后的结果
+                        markdown += processed;
+                    } else {
+                        // 递归处理子节点
+                        const children = node.childNodes;
+                        for (let i = 0; i < children.length; i++) {
+                            walkNodes(children[i]);
+                        }
+                        
+                        // 检查是否为块级元素，需要添加换行
+                        const tagName = node.tagName ? node.tagName.toLowerCase() : '';
+                        const blockElements = ['div', 'p', 'section', 'article', 'header', 'main'];
+                        if (blockElements.includes(tagName) && markdown && !markdown.endsWith('\n')) {
+                            markdown += '\n';
+                        }
+                    }
+                }
+            }
+            
+            walkNodes(content);
+            
+            // 清理多余的空行和空格
+            markdown = markdown
+                .replace(/[ \t]+/g, ' ')  // 多个空格替换为单个空格
+                .replace(/\n{3,}/g, '\n\n')  // 多个换行替换为双换行
+                .replace(/^\s+|\s+$/g, '');  // 去除首尾空白
+            
+            return markdown || 'No content found';
+            
+        } catch (error) {
+            console.error('Error in getPageMarkdown:', error);
+            return 'Error extracting page content: ' + error.message;
+        }
+    };
+
+    /**
+     * Gets interactive elements (compatibility wrapper for getInteractiveRects)
+     * @returns {Array} Array of interactive elements information
+     */
+    let getInteractiveElementsArray = function() {
+        try {
+            const rects = getInteractiveRects();
+            const result = [];
+            
+            for (const id in rects) {
+                if (rects.hasOwnProperty(id)) {
+                    result.push({
+                        id: id,
+                        tag_name: rects[id].tag_name,
+                        role: rects[id].role,
+                        'aria-name': rects[id]['aria-name'],
+                        'v-scrollable': rects[id]['v-scrollable'],
+                        rects: rects[id].rects
+                    });
+                }
+            }
+            
+            return result;
+        } catch (error) {
+            console.error('Error in getInteractiveElementsArray:', error);
+            return [];
+        }
+    };
+
     // Public API
     return {
         getInteractiveRects: getInteractiveRects,
+        getInteractiveElements: getInteractiveElementsArray,
         getVisualViewport: getVisualViewport,
         getFocusedElementId: getFocusedElementId,
         getPageMetadata: getPageMetadata,
         getVisibleText: getVisibleText,
+        getPageMarkdown: getPageMarkdown,
     };
 })();
