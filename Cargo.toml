@@ -22,3 +22,15 @@ dotenv = "0.15"
 axum = "0.7"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "fs"] }
+
+chromiumoxide = "0.5"
+html2md = "0.2"
+tiktoken-rs = "0.5"
+tempfile = "3.0"
+url = "2.4"
+tldextract = "0.6"
+
+# PDF 处理相关依赖
+pdf-extract = "0.7"
+lopdf = "0.32"
+bytes = "1.0"
