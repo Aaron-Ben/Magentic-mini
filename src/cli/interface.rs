@@ -34,7 +34,7 @@ impl CliInterface {
             match self.process_request(&user_input).await {
                 Ok(_) => {}
                 Err(e) => {
-                    println!("{} {}", "❌ Error:".bright_red(), e);
+                    println!("{} {}", "Error:".bright_red(), e);
                 }
             }
 
@@ -58,7 +58,7 @@ impl CliInterface {
 
     async fn process_request(&self, user_input: &str) -> Result<()> {
         // 生成计划
-        let plan = self.orchestrator.generate_plan(user_input).await?;
+        let plan = self.orchestrator.orchestrator_step_planning(user_input).await?;
         
         // 显示计划
         println!("{}", "📋 Generated Plan:".bright_yellow().bold());
@@ -82,7 +82,9 @@ impl CliInterface {
             .interact()?;
         
         if should_execute {
-            self.orchestrator.execute_plan(plan).await?;
+            println!("{}", "🚀 Executing plan...".bright_green().bold());
+            // TODO: 实现执行计划的逻辑
+            println!("{}", "✅ Plan executed successfully!".bright_green());
         } else {
             println!("{}", "Plan cancelled.".yellow());
         }

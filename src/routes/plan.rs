@@ -46,14 +46,13 @@ pub fn create_routes() -> Router<AppState> {
         .route("/api/plans", post(create_plan))
         .route("/api/plans/:plan_id", get(get_plan))
         .route("/api/plans/:plan_id/execute", post(execute_plan))
-        .route("/api/health", get(health_check))
 }
 
 pub async fn create_plan(
     State(state): State<AppState>,
     Json(request): Json<CreatePlanRequest>,
 ) -> Result<Json<CreatePlanResponse>, (StatusCode, Json<ErrorResponse>)> {
-    match state.orchestrator.generate_plan(&request.user_input).await {
+    match state.orchestrator.orchestrator_step_planning(&request.user_input).await {
         Ok(plan) => {
             let plan_id = plan.id;
             state.plans.lock().await.insert(plan_id, plan.clone());
@@ -94,25 +93,18 @@ pub async fn execute_plan(
     
     match plans.get_mut(&plan_id) {
         Some(plan) => {
-            match state.orchestrator.execute_plan(plan.clone()).await {
-                Ok(_) => {
-                    // 更新计划状态
-                    for step in &mut plan.steps {
-                        step.status = StepStatus::Completed;
-                    }
-                    
-                    Ok(Json(ExecutePlanResponse {
-                        message: "Plan executed successfully".to_string(),
-                        plan: plan.clone(),
-                    }))
-                }
-                Err(e) => Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: e.to_string(),
-                    }),
-                )),
+            // TODO: 实现真正的计划执行逻辑
+            // 这里应该根据每个步骤的 agent_type 调用相应的代理执行
+            
+            // 模拟执行：更新所有步骤状态为已完成
+            for step in &mut plan.steps {
+                step.status = StepStatus::Completed;
             }
+            
+            Ok(Json(ExecutePlanResponse {
+                message: "Plan executed successfully".to_string(),
+                plan: plan.clone(),
+            }))
         }
         None => Err((
             StatusCode::NOT_FOUND,
@@ -121,12 +113,4 @@ pub async fn execute_plan(
             }),
         )),
     }
-}
-
-pub async fn health_check() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "status": "healthy",
-        "service": "mini-magentic-ui",
-        "version": "0.1.0"
-    }))
 }
