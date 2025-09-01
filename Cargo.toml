@@ -29,6 +29,8 @@ tiktoken-rs = "0.5"
 tempfile = "3.0"
 url = "2.4"
 tldextract = "0.6"
+urlencoding = "2.1"
+futures = "0.3"
 
 # PDF 处理相关依赖
 pdf-extract = "0.7"
