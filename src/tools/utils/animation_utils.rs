@@ -1,8 +1,5 @@
-use chromiumoxide::browser::Browser;
 use chromiumoxide::Page;
-use serde_json::json;
 use std::time::Duration;
-use tokio::time::sleep;
 
 pub struct AnimationUtils {
     last_cursor_position: (f64, f64),
@@ -18,45 +15,39 @@ impl AnimationUtils {
     /// 高亮元素 + 创建自定义光标
     pub async fn add_cursor_box(&self, page: &Page, identifier: &str) -> Result<(), Box<dyn std::error::Error>> {
         // 1. 高亮元素
-        page.evaluate(
+        let js_code = format!(
             r#"
-            (identifier) => {
-                const elm = document.querySelector(`[__elementId='${identifier}']`);
-                if (elm) {
-                    elm.style.transition = 'border 0.1s ease-in-out';
-                    elm.style.border = '2px solid red';
-                }
-            }
+            const elm = document.querySelector(`[__elementId='{}']`);
+            if (elm) {{
+                elm.style.transition = 'border 0.1s ease-in-out';
+                elm.style.border = '2px solid red';
+            }}
             "#,
-            json!([identifier]),
-        )
-        .await?;
+            identifier
+        );
+        page.evaluate(js_code.as_str()).await?;
 
-        // 等待动画
-        sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // 2. 创建自定义光标
         page.evaluate(
             r#"
-            () => {
-                let cursor = document.getElementById('red-cursor');
-                if (!cursor) {
-                    cursor = document.createElement('div');
-                    cursor.id = 'red-cursor';
-                    cursor.style.position = 'absolute';
-                    cursor.style.width = '12px';
-                    cursor.style.height = '12px';
-                    cursor.style.borderRadius = '50%';
-                    cursor.style.zIndex = '999999';
-                    cursor.style.pointerEvents = 'none';
-                    cursor.style.background = 'radial-gradient(circle at center, #fff 20%, #f00 100%)';
-                    cursor.style.boxShadow = '0 0 6px 2px rgba(255,0,0,0.5)';
-                    cursor.style.transition = 'left 0.05s linear, top 0.05s linear';
-                    document.body.appendChild(cursor);
-                }
+            let cursor = document.getElementById('red-cursor');
+            if (!cursor) {
+                cursor = document.createElement('div');
+                cursor.id = 'red-cursor';
+                cursor.style.position = 'absolute';
+                cursor.style.width = '12px';
+                cursor.style.height = '12px';
+                cursor.style.borderRadius = '50%';
+                cursor.style.zIndex = '999999';
+                cursor.style.pointerEvents = 'none';
+                cursor.style.background = 'radial-gradient(circle at center, #fff 20%, #f00 100%)';
+                cursor.style.boxShadow = '0 0 6px 2px rgba(255,0,0,0.5)';
+                cursor.style.transition = 'left 0.05s linear, top 0.05s linear';
+                document.body.appendChild(cursor);
             }
             "#,
-            json!([]),
         )
         .await?;
 
@@ -74,44 +65,38 @@ impl AnimationUtils {
         steps: usize,
         step_delay_ms: u64,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let delay = Duration::from_millis(step_delay_ms);
-
         for step in 0..steps {
-            let t = step as f64 / steps as f64;
-            let x = start_x + (end_x - start_x) * t;
-            let y = start_y + (end_y - start_y) * t;
+            let ratio = step as f64 / steps as f64;
+            let x = start_x + (end_x - start_x) * ratio;
+            let y = start_y + (end_y - start_y) * ratio;
 
-            page.evaluate(
+            let js_code = format!(
                 r#"
-                ([x, y]) => {
-                    const cursor = document.getElementById('red-cursor');
-                    if (cursor) {
-                        cursor.style.left = x + 'px';
-                        cursor.style.top = y + 'px';
-                    }
-                }
+                const cursor = document.getElementById('red-cursor');
+                if (cursor) {{
+                    cursor.style.left = {} + 'px';
+                    cursor.style.top = {} + 'px';
+                }}
                 "#,
-                json!([[x, y]]),
-            )
-            .await?;
+                x, y
+            );
+            page.evaluate(js_code.as_str()).await?;
 
-            sleep(delay).await;
+            tokio::time::sleep(Duration::from_millis(step_delay_ms)).await;
         }
 
-        // 最终位置（确保精确）
-        page.evaluate(
+        // 最终位置
+        let js_code = format!(
             r#"
-            ([x, y]) => {
-                const cursor = document.getElementById('red-cursor');
-                if (cursor) {
-                    cursor.style.left = x + 'px';
-                    cursor.style.top = y + 'px';
-                }
-            }
+            const cursor = document.getElementById('red-cursor');
+            if (cursor) {{
+                cursor.style.left = {} + 'px';
+                cursor.style.top = {} + 'px';
+            }}
             "#,
-            json!([[end_x, end_y]]),
-        )
-        .await?;
+            end_x, end_y
+        );
+        page.evaluate(js_code.as_str()).await?;
 
         self.last_cursor_position = (end_x, end_y);
 
@@ -120,49 +105,44 @@ impl AnimationUtils {
 
     /// 移除高亮和光标
     pub async fn remove_cursor_box(&self, page: &Page, identifier: &str) -> Result<(), Box<dyn std::error::Error>> {
-        page.evaluate(
+        let js_code = format!(
             r#"
-            (identifier) => {
-                // 移除高亮
-                const elm = document.querySelector(`[__elementId='${identifier}']`);
-                if (elm) {
-                    elm.style.border = '';
-                    elm.style.transition = '';
-                }
-                // 移除光标
-                const cursor = document.getElementById('red-cursor');
-                if (cursor) {
-                    cursor.remove();
-                }
-            }
+            const elm = document.querySelector(`[__elementId='{}']`);
+            if (elm) {{
+                elm.style.border = '';
+                elm.style.transition = '';
+            }}
+            const cursor = document.getElementById('red-cursor');
+            if (cursor) {{
+                cursor.remove();
+            }}
             "#,
-            json!([identifier]),
-        )
-        .await?;
+            identifier
+        );
+        page.evaluate(js_code.as_str()).await?;
 
         Ok(())
     }
 
     /// 清理所有动画效果
-    pub async fn cleanup_animations(&self, page: &Page) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn cleanup_animations(&mut self, page: &Page) -> Result<(), Box<dyn std::error::Error>> {
         page.evaluate(
             r#"
-            () => {
-                // 移除光标
-                const cursor = document.getElementById('red-cursor');
-                if (cursor) {
-                    cursor.remove();
-                }
-                // 移除所有带 __elementId 的高亮
-                document.querySelectorAll('[__elementId]').forEach(el => {
-                    el.style.border = '';
-                    el.style.transition = '';
-                });
+            const cursor = document.getElementById('red-cursor');
+            if (cursor) {
+                cursor.remove();
             }
+            const elements = document.querySelectorAll('[__elementId]');
+            elements.forEach(el => {
+                el.style.border = '';
+                el.style.transition = '';
+            });
             "#,
-            json!([]),
         )
         .await?;
+
+        self.last_cursor_position = (0.0, 0.0);
+
         Ok(())
     }
 }

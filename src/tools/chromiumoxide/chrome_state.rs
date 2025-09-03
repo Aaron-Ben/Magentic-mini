@@ -1,14 +1,12 @@
 use anyhow::{anyhow, Result};
-use chromiumoxide::browser::{Browser, BrowserConfig};
+use chromiumoxide::browser::{Browser};
 use chromiumoxide::page::Page;
-use chromiumoxide::cdp::browser_protocol::page::Viewport;
-use chromiumoxide::cdp::browser_protocol::network::Cookie;
-use chromiumoxide::cdp::browser_protocol::storage::GetCookiesParams;
-use log::{error, info};
+use chromiumoxide::cdp::browser_protocol::network::{Cookie, CookieParam, GetCookiesParams, SetCookiesParams, TimeSinceEpoch};
+use log::{warn};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
+use url::Url;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Tab {
@@ -18,7 +16,6 @@ pub struct Tab {
     pub scroll_y: i64,
 }
 
-// 定义 BrowserState 结构体
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BrowserState {
     pub state: StorageState,
@@ -26,111 +23,151 @@ pub struct BrowserState {
     pub active_tab_index: usize,
 }
 
-// StorageState：简化版本，包含 cookies 和 local_storage
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct StorageState {
     pub cookies: Vec<Cookie>,
-    pub local_storage: HashMap<String, Value>,
+    pub origins: Vec<OriginState>,
 }
 
-// 保存浏览器状态
-pub async fn save_browser_state(
-    browser: &Browser,
-    controlled_page: Option<&Page>,
-    simplified: bool,
-) -> Result<BrowserState> {
-    let pages = browser.pages().await?;
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct OriginState {
+    pub origin: String,
+    pub local_storage: Vec<LocalStorageEntry>,
+}
 
-    // 确定活动标签索引
-    let mut active_tab_index = 0;
-    if let Some(controlled) = controlled_page {
-        for (i, page) in pages.iter().enumerate() {
-            if page.page_id() == controlled.page_id() {
-                active_tab_index = i;
-                break;
-            }
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LocalStorageEntry {
+    pub key: String,
+    pub value: String,
+}
+
+fn extract_origin(url_str: &str) -> String {
+    if let Ok(url) = Url::parse(url_str) {
+        if let Some(host) = url.host_str() {
+            format!("{}://{}", url.scheme(), host)
+        } else {
+            url_str.to_string()
+        }
+    } else {
+        url_str.to_string()
+    }
+}
+
+async fn get_scroll_position(page: &Page) -> Result<(i64, i64), anyhow::Error> {
+    let result = page
+        .evaluate("() => ({ scrollX: window.scrollX, scrollY: window.scrollY })")
+        .await
+        .map_err(|e| anyhow!("Failed to evaluate scroll position: {}", e))?;
+    let value: HashMap<String, f64> = result
+        .into_value()
+        .map_err(|e| anyhow!("Failed to parse scroll position: {}", e))?;
+    Ok((
+        value.get("scrollX").unwrap_or(&0.0).round() as i64,
+        value.get("scrollY").unwrap_or(&0.0).round() as i64,
+    ))
+}
+
+async fn get_storage_state(pages: &[Page]) -> Result<StorageState, anyhow::Error> {
+    let mut cookies = Vec::new();
+    let mut origins = Vec::new();
+
+    // 获取 cookies（从第一个页面，假设共享上下文）
+    if let Some(first_page) = pages.first() {
+        cookies = first_page
+            .execute(GetCookiesParams::default())
+            .await
+            .map(|res| res.cookies.clone())
+            .map_err(|e| anyhow!("Failed to get cookies: {}", e))?;
+    }
+
+    // 获取每个页面的 local storage，按 origin 分组
+    for page in pages {
+        let page_url = page
+            .url()
+            .await
+            .map_err(|e| anyhow!("Failed to get page URL: {}", e))?
+            .unwrap_or_default();
+        
+        let origin = extract_origin(&page_url);
+        
+        let local_storage: HashMap<String, String> = page
+            .evaluate(
+                r#"
+                () => {
+                    const o = {};
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const k = localStorage.key(i);
+                        if (k) o[k] = localStorage.getItem(k) || "";
+                    }
+                    return o;
+                }
+                "#,
+            )
+            .await
+            .map_err(|e| anyhow!("Failed to evaluate localStorage script: {}", e))?
+            .into_value()
+            .map_err(|e| anyhow!("Failed to get local storage: {}", e))?;
+
+        let local_storage_entries = local_storage
+            .into_iter()
+            .map(|(key, value)| LocalStorageEntry { key, value })
+            .collect::<Vec<_>>();
+
+        if !local_storage_entries.is_empty() {
+            origins.push(OriginState {
+                origin,
+                local_storage: local_storage_entries,
+            });
         }
     }
 
-    // 如果简化模式，跳过存储状态
-    let state = if simplified {
-        StorageState::default()
-    } else {
-        // 获取存储状态（以第一个页面为例）
-        if pages.is_empty() {
-            return Err(anyhow!("No pages available to save state"));
+    Ok(StorageState { cookies, origins })
+}
+
+pub async fn save_browser_state(
+    pages: &[Page],
+    controlled_page: Option<&Page>,
+    simplified: bool,
+) -> Result<BrowserState, anyhow::Error> {
+    let mut active_tab_index = 0;
+
+    // 查找 controlled_page 的索引
+    if let Some(ctrl_page) = controlled_page {
+        if let Some(i) = pages.iter().position(|p| p.target_id() == ctrl_page.target_id()) {
+            active_tab_index = i;
         }
-        let first_page = &pages[0];
-        
-        // 获取 cookies
-        let cookies_result = first_page.execute(GetCookiesParams::default()).await;
-        let cookies = match cookies_result {
-            Ok(result) => result.cookies,
-            Err(e) => {
-                error!("Failed to get cookies: {}", e);
-                Vec::new()
-            }
-        };
+    }
 
-        // 获取 localStorage
-        let local_storage: HashMap<String, Value> = match first_page
-            .evaluate("JSON.stringify(localStorage)")
-            .await
-        {
-            Ok(res) => {
-                let mut map = HashMap::new();
-                if let Ok(value) = res.into_value() {
-                    map.insert(first_page.url().to_string(), value);
-                }
-                map
-            }
-            Err(e) => {
-                error!("Failed to get localStorage: {}", e);
-                HashMap::new()
-            }
-        };
+    // 收集所有标签页状态
+    let mut tabs = Vec::with_capacity(pages.len());
 
-        StorageState {
-            cookies,
-            local_storage,
-        }
-    };
-
-    // 保存标签页
-    let mut tabs = Vec::new();
     for (i, page) in pages.iter().enumerate() {
+        let url = page
+            .url()
+            .await
+            .map_err(|e| anyhow!("Failed to get page URL: {}", e))?
+            .unwrap_or_else(|| "about:blank".to_string());
+
         let (scroll_x, scroll_y) = if simplified {
             (0, 0)
         } else {
-            // 通过 JS 获取滚动位置
-            match page
-                .evaluate("({ scrollX: window.scrollX, scrollY: window.scrollY })")
-                .await
-            {
-                Ok(res) => {
-                    if let Ok(scroll_data) = res.into_value::<HashMap<String, i64>>() {
-                        (
-                            *scroll_data.get("scrollX").unwrap_or(&0),
-                            *scroll_data.get("scrollY").unwrap_or(&0),
-                        )
-                    } else {
-                        (0, 0)
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to get scroll position: {}", e);
-                    (0, 0)
-                }
-            }
+            get_scroll_position(page).await?
         };
 
         tabs.push(Tab {
-            url: page.url().to_string(),
+            url,
             index: i,
             scroll_x,
             scroll_y,
         });
     }
+
+    // 获取存储状态
+    let state = if simplified {
+        StorageState::default()
+    } else {
+        get_storage_state(pages).await?
+    };
 
     Ok(BrowserState {
         state,
@@ -139,76 +176,133 @@ pub async fn save_browser_state(
     })
 }
 
-// 加载浏览器状态
 pub async fn load_browser_state(
     browser: &Browser,
     state: BrowserState,
     load_only_active_tab: bool,
-) -> Result<()> {
-    // 获取当前页面
+) -> Result<(), anyhow::Error> {
+    // 1. 关闭所有 about:blank 页面
     let pages = browser.pages().await?;
-
-    // 关闭空白页 (about:blank)
-    for page in pages.iter() {
-        if page.url() == "about:blank" {
-            let _ = page.close().await;
+    let mut pages_to_close = vec![];
+    for page in pages {
+        let page_url = page
+            .url()
+            .await
+            .map_err(|e| anyhow!("Failed to get page URL: {}", e))?
+            .unwrap_or_default();
+        if page_url == "about:blank" {
+            pages_to_close.push(page);
         }
     }
+    for page in pages_to_close {
+        let _ = page.close().await;
+    }
 
-    // 确定要恢复的标签页
+    // 2. 恢复存储状态
+    if !state.state.cookies.is_empty() {
+        let cookie_params: Vec<CookieParam> = state.state.cookies
+            .iter()
+            .map(|cookie| CookieParam {
+                name: cookie.name.clone(),
+                value: cookie.value.clone(),
+                url: None,
+                domain: Some(cookie.domain.clone()),
+                path: Some(cookie.path.clone()),
+                secure: Some(cookie.secure),
+                http_only: Some(cookie.http_only),
+                same_site: cookie.same_site.clone(),
+                expires: Some(TimeSinceEpoch::new(cookie.expires)),
+                priority: Some(cookie.priority.clone()),
+                same_party: Some(cookie.same_party),
+                source_scheme: Some(cookie.source_scheme.clone()),
+                source_port: Some(cookie.source_port),
+                partition_key: cookie.partition_key.clone(),
+            })
+            .collect();
+
+        browser
+            .execute(SetCookiesParams {
+                cookies: cookie_params,
+            })
+            .await
+            .map_err(|e| anyhow!("Failed to set cookies: {}", e))?;
+    }
+
+    // 3. 确定要恢复的标签
     let tabs_to_restore = if load_only_active_tab {
         if state.active_tab_index < state.tabs.len() {
             vec![state.tabs[state.active_tab_index].clone()]
         } else {
-            return Err(anyhow!("Invalid active tab index"));
+            warn!("Invalid active tab index: {}, using first tab", state.active_tab_index);
+            vec![state.tabs.first().ok_or_else(|| anyhow!("No tabs to restore"))?.clone()]
         }
     } else {
         state.tabs.clone()
     };
 
-    // 创建并恢复标签页
-    let mut restored_pages: Vec<Page> = Vec::new();
-    for tab in tabs_to_restore {
-        let page = browser.new_page(&tab.url).await?;
-        page.wait_for_navigation().await?;
+    let mut restored_pages = vec![];
 
-        // 设置滚动位置
-        let _ = page.evaluate(format!(
-            "window.scrollTo({}, {})",
-            tab.scroll_x, tab.scroll_y
-        ))
-        .await;
+    // 4. 创建新页面并跳转
+    for tab in &tabs_to_restore {
+        let page = browser
+            .new_page("about:blank")
+            .await
+            .map_err(|e| anyhow!("Failed to create new page: {}", e))?;
+        
+        if !tab.url.is_empty() && tab.url != "about:blank" {
+            page.goto(&tab.url)
+                .await
+                .map_err(|e| anyhow!("Failed to navigate to {}: {}", tab.url, e))?;
+            
+            // 等待页面加载完成
+            let _ = page.wait_for_navigation().await;
+        }
+
+        // 恢复 local storage
+        let tab_origin = extract_origin(&tab.url);
+        for origin_state in &state.state.origins {
+            if origin_state.origin == tab_origin {
+                for entry in &origin_state.local_storage {
+                    let js = format!(
+                        r#"
+                        () => {{
+                            try {{
+                                localStorage.setItem('{}', '{}');
+                            }} catch (e) {{
+                                console.error('Failed to set localStorage:', e);
+                            }}
+                        }}
+                        "#,
+                        entry.key.replace("'", "\\'").replace("\\", "\\\\"),
+                        entry.value.replace("'", "\\'").replace("\\", "\\\\")
+                    );
+                    let _ = page.evaluate(js.as_str()).await;
+                }
+            }
+        }
+
+        // 滚动到位置
+        if tab.scroll_x != 0 || tab.scroll_y != 0 {
+            let js = format!("() => window.scrollTo({}, {})", tab.scroll_x, tab.scroll_y);
+            let _ = page.evaluate(js.as_str()).await;
+        }
 
         restored_pages.push(page);
     }
 
-    // 恢复存储状态（如果非简化）
-    if !state.state.cookies.is_empty() || !state.state.local_storage.is_empty() {
-        if let Some(first_page) = restored_pages.first() {
-            // 设置 localStorage
-            for (origin, ls) in state.state.local_storage {
-                if origin == first_page.url() {
-                    let _ = first_page
-                        .evaluate(format!(
-                            "Object.assign(localStorage, {})",
-                            serde_json::to_string(&ls).unwrap_or_default()
-                        ))
-                        .await;
-                }
-            }
-        }
-    }
-
-    // 激活活动标签
+    // 5. 激活正确的标签页
     if !restored_pages.is_empty() {
-        let active_index = if load_only_active_tab { 0 } else { state.active_tab_index };
-        if active_index < restored_pages.len() {
-            let _ = restored_pages[active_index]
-                .set_viewport(Some(Viewport::default()))
-                .await;
-        }
-        // 等待 5 秒稳定
-        sleep(Duration::from_secs(5)).await;
+        let active_index = if load_only_active_tab {
+            0
+        } else {
+            state.active_tab_index.min(restored_pages.len() - 1)
+        };
+        restored_pages[active_index]
+            .bring_to_front()
+            .await
+            .map_err(|e| anyhow!("Failed to bring page to front: {}", e))?;
+
+        sleep(Duration::from_millis(1000)).await;
     }
 
     Ok(())
