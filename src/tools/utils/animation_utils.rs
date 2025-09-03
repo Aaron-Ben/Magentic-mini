@@ -1,4 +1,5 @@
-use chromiumoxide::Page;
+use headless_chrome::Tab;
+use std::sync::Arc;
 use std::time::Duration;
 
 pub struct AnimationUtils {
@@ -13,7 +14,7 @@ impl AnimationUtils {
     }
 
     /// 高亮元素 + 创建自定义光标
-    pub async fn add_cursor_box(&self, page: &Page, identifier: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn add_cursor_box(&self, tab: &Arc<Tab>, identifier: &str) -> Result<(), Box<dyn std::error::Error>> {
         // 1. 高亮元素
         let js_code = format!(
             r#"
@@ -25,12 +26,12 @@ impl AnimationUtils {
             "#,
             identifier
         );
-        page.evaluate(js_code.as_str()).await?;
+        tab.evaluate(&js_code, false)?;
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // 2. 创建自定义光标
-        page.evaluate(
+        tab.evaluate(
             r#"
             let cursor = document.getElementById('red-cursor');
             if (!cursor) {
@@ -48,8 +49,8 @@ impl AnimationUtils {
                 document.body.appendChild(cursor);
             }
             "#,
-        )
-        .await?;
+            false,
+        )?;
 
         Ok(())
     }
@@ -57,7 +58,7 @@ impl AnimationUtils {
     /// 从 (start_x, start_y) 平滑移动到 (end_x, end_y)
     pub async fn gradual_cursor_animation(
         &mut self,
-        page: &Page,
+        tab: &Arc<Tab>,
         start_x: f64,
         start_y: f64,
         end_x: f64,
@@ -80,7 +81,7 @@ impl AnimationUtils {
                 "#,
                 x, y
             );
-            page.evaluate(js_code.as_str()).await?;
+            tab.evaluate(&js_code, false)?;
 
             tokio::time::sleep(Duration::from_millis(step_delay_ms)).await;
         }
@@ -96,7 +97,7 @@ impl AnimationUtils {
             "#,
             end_x, end_y
         );
-        page.evaluate(js_code.as_str()).await?;
+        tab.evaluate(&js_code, false)?;
 
         self.last_cursor_position = (end_x, end_y);
 
@@ -104,7 +105,7 @@ impl AnimationUtils {
     }
 
     /// 移除高亮和光标
-    pub async fn remove_cursor_box(&self, page: &Page, identifier: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn remove_cursor_box(&self, tab: &Arc<Tab>, identifier: &str) -> Result<(), Box<dyn std::error::Error>> {
         let js_code = format!(
             r#"
             const elm = document.querySelector(`[__elementId='{}']`);
@@ -119,14 +120,14 @@ impl AnimationUtils {
             "#,
             identifier
         );
-        page.evaluate(js_code.as_str()).await?;
+        tab.evaluate(&js_code, false)?;
 
         Ok(())
     }
 
     /// 清理所有动画效果
-    pub async fn cleanup_animations(&mut self, page: &Page) -> Result<(), Box<dyn std::error::Error>> {
-        page.evaluate(
+    pub async fn cleanup_animations(&mut self, tab: &Arc<Tab>) -> Result<(), Box<dyn std::error::Error>> {
+        tab.evaluate(
             r#"
             const cursor = document.getElementById('red-cursor');
             if (cursor) {
@@ -138,8 +139,8 @@ impl AnimationUtils {
                 el.style.transition = '';
             });
             "#,
-        )
-        .await?;
+            false,
+        )?;
 
         self.last_cursor_position = (0.0, 0.0);
 

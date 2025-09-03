@@ -1,8 +1,9 @@
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 
-use chromiumoxide::Page;
+use headless_chrome::Tab;
 use html2md;
 use log::{error, info};
 use pdf_extract;
@@ -29,12 +30,18 @@ impl WebpageTextUtils {
         Self { page_script }
     }
 
-    pub async fn get_all_webpage_text(&self, page: &Page, n_lines: usize) -> String {
-        let text: String = page
-            .evaluate("document.body.innerText")
-            .await
-            .map(|res| res.into_value::<String>().unwrap_or_default())
-            .unwrap_or_default();
+    pub async fn get_all_webpage_text(&self, tab: &Arc<Tab>, n_lines: usize) -> String {
+        let result = tab.evaluate("document.body.innerText", false);
+        let text = match result {
+            Ok(eval_result) => {
+                if let Some(value) = eval_result.value {
+                    serde_json::from_value::<String>(value).unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            }
+            Err(_) => String::new(),
+        };
 
         text.lines()
             .take(n_lines)
@@ -43,29 +50,42 @@ impl WebpageTextUtils {
             .join("\n")
     }
 
-    pub async fn get_visible_text(&self, page: &Page) -> String {
-        let _ = page.evaluate(self.page_script.as_str()).await;
+    pub async fn get_visible_text(&self, tab: &Arc<Tab>) -> String {
+        let _ = tab.evaluate(&self.page_script, false);
 
-        page.evaluate("WebSurfer.getVisibleText();")
-            .await
-            .map(|res| res.into_value::<String>().unwrap_or_default())
-            .unwrap_or_default()
+        let result = tab.evaluate("WebSurfer.getVisibleText();", false);
+        match result {
+            Ok(eval_result) => {
+                if let Some(value) = eval_result.value {
+                    serde_json::from_value::<String>(value).unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            }
+            Err(_) => String::new(),
+        }
     }
 
-    pub async fn get_page_markdown(&self, page: &Page, max_tokens: i32) -> String {
-        let is_pdf = self.is_pdf_page(page).await;
+    pub async fn get_page_markdown(&self, tab: &Arc<Tab>, max_tokens: i32) -> String {
+        let is_pdf = self.is_pdf_page(tab).await;
 
         let content = if is_pdf {
-            self.extract_pdf_content(page).await
+            self.extract_pdf_content(tab).await
         } else {
             // 注入 page_script.js 并获取HTML
-            let _ = page.evaluate(self.page_script.as_str()).await;
+            let _ = tab.evaluate(&self.page_script, false);
             
-            let html = page
-                .evaluate("document.documentElement.outerHTML")
-                .await
-                .map(|res| res.into_value::<String>().unwrap_or_default())
-                .unwrap_or_default();
+            let result = tab.evaluate("document.documentElement.outerHTML", false);
+            let html = match result {
+                Ok(eval_result) => {
+                    if let Some(value) = eval_result.value {
+                        serde_json::from_value::<String>(value).unwrap_or_default()
+                    } else {
+                        String::new()
+                    }
+                }
+                Err(_) => String::new(),
+            };
             html2md::parse_html(&html).to_string()
         };
 
@@ -93,8 +113,8 @@ impl WebpageTextUtils {
     }
 
     /// 获取清理后的页面 Markdown，移除冗余内容
-    pub async fn get_clean_page_markdown(&self, page: &Page, max_tokens: i32) -> String {
-        let content = self.get_page_markdown(page, max_tokens).await;
+    pub async fn get_clean_page_markdown(&self, tab: &Arc<Tab>, max_tokens: i32) -> String {
+        let content = self.get_page_markdown(tab, max_tokens).await;
         
         content
             .lines()
@@ -105,11 +125,8 @@ impl WebpageTextUtils {
             .replace("\n\n\n", "\n\n") // 减少多余的空行
     }
 
-    async fn is_pdf_page(&self, page: &Page) -> bool {
-        let url = match page.url().await {
-            Ok(Some(url)) => url,
-            Ok(None) | Err(_) => return false,
-        };
+    async fn is_pdf_page(&self, tab: &Arc<Tab>) -> bool {
+        let url = tab.get_url();
         
         if url.to_lowercase().ends_with(".pdf") {
             return true;
@@ -125,21 +142,28 @@ impl WebpageTextUtils {
             }
         "#;
 
-        page.evaluate(js)
-            .await
-            .map(|res| res.into_value::<bool>().unwrap_or_default())
-            .unwrap_or_default()
+        let result = tab.evaluate(js, false);
+        match result {
+            Ok(eval_result) => {
+                if let Some(value) = eval_result.value {
+                    serde_json::from_value::<bool>(value).unwrap_or_default()
+                } else {
+                    false
+                }
+            }
+            Err(_) => false,
+        }
     }
 
-    async fn extract_pdf_content(&self, page: &Page) -> String {
-        let url = match page.url().await {
-            Ok(Some(url)) => url,
-            Ok(None) => return "Error: page has no URL".to_string(),
-            Err(_) => return "Error: failed to get page URL".to_string(),
-        };
+    async fn extract_pdf_content(&self, tab: &Arc<Tab>) -> String {
+        let url = tab.get_url();
+        
+        if url.is_empty() {
+            return "Error: page has no URL".to_string();
+        }
 
         // 尝试从浏览器提取
-        let browser_text = self.extract_pdf_browser(page).await;
+        let browser_text = self.extract_pdf_browser(tab).await;
         if browser_text.len() > 100 {
             return browser_text;
         }
@@ -182,7 +206,7 @@ impl WebpageTextUtils {
         }
     }
 
-    async fn extract_pdf_browser(&self, page: &Page) -> String {
+    async fn extract_pdf_browser(&self, tab: &Arc<Tab>) -> String {
         let js = r#"
             () => {
                 if (window.PDFViewerApplication) {
@@ -203,9 +227,16 @@ impl WebpageTextUtils {
             }
         "#;
 
-        page.evaluate(js)
-            .await
-            .map(|res| res.into_value::<String>().unwrap_or_default())
-            .unwrap_or_default()
+        let result = tab.evaluate(js, false);
+        match result {
+            Ok(eval_result) => {
+                if let Some(value) = eval_result.value {
+                    serde_json::from_value::<String>(value).unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            }
+            Err(_) => String::new(),
+        }
     }
 }
