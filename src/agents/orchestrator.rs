@@ -4,7 +4,7 @@ use crate::agents::PlanAgent;
 use anyhow::Result;
 
 pub struct Orchestrator {
-    plan_agent: PlanAgent,
+    pub plan_agent: PlanAgent,
 }
 
 impl Orchestrator {

@@ -21,45 +21,7 @@ impl LlmClient {
             base_url: "https://dashscope.aliyuncs.com/api/v1".to_string(),
         })
     }
-
-    pub async fn execute_step(&self, step_details: &str, agent_type: &str) -> Result<String> {
-        let prompt = format!(
-            "你是一个{}代理。请执行这个步骤：{}\n\n请回复执行结果或你将采取的行动。",
-            agent_type, step_details
-        );
-
-        let response = self.client
-            .post(&format!("{}/services/aigc/text-generation/generation", self.base_url))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&json!({
-                "model": "qwen-turbo",
-                "input": {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ]
-                },
-                "parameters": {
-                    "temperature": 0.7,
-                    "max_tokens": 1000
-                }
-            }))
-            .send()
-            .await?;
-
-        let response_json: Value = response.json().await?;
-        
-        // 根据 DashScope API 的实际响应格式解析
-        let content = response_json["output"]["choices"][0]["message"]["content"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid response format: {:?}", response_json))?;
-
-        Ok(content.to_string())
-    }
-
+    
     pub async fn create_completion(&self, messages: Vec<LlmMessage>, response_format: Option<String>) -> Result<LlmResponse> {
         let mut request_body = json!({
             "model": "qwen-turbo",

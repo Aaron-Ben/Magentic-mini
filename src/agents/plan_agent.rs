@@ -1,148 +1,143 @@
 use crate::llm::LlmClient;
 use crate::types::*;
+use super::plan_agent_utils::prompt::*;
 use anyhow::{Result, anyhow};
 use serde_json::Value;
+use colored::*;
 
 pub struct PlanAgent {
     llm_client: LlmClient,
+    sentinel_tasks_enabled: bool,  // 新增字段
 }
 
 impl PlanAgent {
     pub fn new(llm_client: LlmClient) -> Self {
-        Self { llm_client }
+        Self { 
+            llm_client,
+            sentinel_tasks_enabled: false,  // 默认关闭
+        }
+    }
+
+    pub fn with_sentinel_tasks(llm_client: LlmClient, sentinel_tasks_enabled: bool) -> Self {
+        Self {
+            llm_client,
+            sentinel_tasks_enabled,
+        }
     }
 
     /// 从用户输入生成计划
     pub async fn generate_plan_from_input(&self, user_input: &str) -> Result<Plan> {
         println!("Generating plan for: {}", user_input);
         
-        // 将用户输入转换为 ChatMessage 格式
-        let chat_messages = vec![ChatMessage::TextMessage {
-            content: user_input.to_string(),
-            source: "user".to_string(),
-            timestamp: None,
-        }];
+        // 创建用户消息
+        let user_message = create_user_message(user_input.to_string(), "user".to_string());
         
-        self.generate_plan_from_messages(chat_messages).await
+        self.generate_plan_from_messages(vec![user_message]).await
     }
 
     /// 从消息生成计划
-    pub async fn generate_plan_from_messages(&self, chat_messages: Vec<ChatMessage>) -> Result<Plan> {
-        // 1. 转换 chat_history 为 LLMMessage 格式
-        let llm_messages: Vec<LlmMessage> = chat_messages.into_iter().map(|msg| {
-            match msg {
-                ChatMessage::TextMessage { content, source, .. } => LlmMessage {
-                    role: if source == "user" { "user".to_string() } else { "assistant".to_string() },
-                    content,
-                },
-                ChatMessage::MultiModalMessage { text_content, source, .. } => LlmMessage {
-                    role: if source == "user" { "user".to_string() } else { "assistant".to_string() },
-                    content: text_content, // 简化处理，只取文本内容
-                },
-            }
+    pub async fn generate_plan_from_messages(&self, user_messages: Vec<ChatMessage>) -> Result<Plan> {
+        // 1. 创建系统消息
+        let system_message = create_system_message(self.sentinel_tasks_enabled);
+        
+        // 2. 创建计划指令消息（来自 orchestrator）
+        let plan_instruction = create_plan_instruction_message(self.sentinel_tasks_enabled);
+        
+        // 3. 构建最终的消息列表：SystemMessage + UserMessage(用户输入) + UserMessage(计划指令)
+        let mut final_messages = vec![system_message];
+        final_messages.extend(user_messages);
+        final_messages.push(plan_instruction);
+        
+        // 4. 转换为 LLM 格式
+        let llm_messages: Vec<LlmMessage> = final_messages.into_iter().map(|msg| {
+            let content = msg.get_text().unwrap_or_default();
+            let role = match msg.role {
+                Role::System => "system".to_string(),
+                Role::User => "user".to_string(),
+                Role::Assistant => "assistant".to_string(),
+                Role::Tool => "tool".to_string(),
+            };
+            LlmMessage { role, content }
         }).collect();
-
-        // 2. 构建 instruction_message
-        let instruction_content = self.build_plan_instruction();
-
-        let instruction_message = LlmMessage {
-            role: "user".to_string(),
-            content: instruction_content,
-        };
-
-        let mut final_messages = vec![instruction_message];
-        final_messages.extend(llm_messages);
-
-        // 3. LLM 调用
-        let response = self.llm_client.create_completion(final_messages, Some("json_object".to_string())).await?;
-
+        
+        // 5. 调用 LLM
+        let response = self.llm_client.create_completion(llm_messages, Some("json_object".to_string())).await?;
+        
         let plan_content = response.choices.into_iter().next()
             .and_then(|c| Some(c.message.content))
             .ok_or_else(|| anyhow!("LLM did not return plan content"))?;
-
-        // 4. 解析结果
-        self.parse_plan_response(&plan_content)
+        
+        // 6. 解析和验证 JSON 响应
+        self.get_json_response(&plan_content).await
     }
 
-    /// 构建计划生成的指令提示
-    fn build_plan_instruction(&self) -> String {
-        r###"
-The above messages are a conversation between a user and an AI assistant.
-The AI assistant helped the user with their task and arrived potentially at a "Final Answer" to accomplish their task.
-
-We want to be able to learn a plan from the conversation that can be used to accomplish the task as efficiently as possible.
-This plan should help us accomplish this task and tasks similar to it more efficiently in the future as we learned from the mistakes and successes of the AI assistant and the details of the conversation.
-
-Guidelines:
-- We want the most efficient and direct plan to accomplish the task. The less number of steps, the better. Some agents can perform multiple steps in one go.
-- We don't need to repeat the exact sequence of the conversation, but rather we need to focus on how to get to the final answer most efficiently without directly giving the final answer.
-- Include details about the actions performed, buttons clicked, urls visited if they are useful.
-For instance, if the plan was trying to find the github stars of autogen and arrived at the link https://github.com/microsoft/autogen then mention that link.
-Or if the web surfer clicked a specific button to create an issue, mention that button.
-
-Here is an example of a plan that the AI assistant might follow:
-
-Example:
-
-User request: "On which social media platform does Autogen have the most followers?"
-
-Step 1:
-- title: "Find all social media platforms that Autogen is on"
-- details: "1) do a search for autogen social media platforms using Bing, 2) find the official link for autogen where the social media platforms might be listed, 3) report back all the social media platforms that Autogen is on"
-- agent_type: "WebSurfer"
-
-Step 2:
-- title: "Find the number of followers on Twitter"
-- details: "Go to the official link for autogen on the web and find the number of followers on Twitter"
-- agent_type: "WebSurfer"
-
-Step 3:
-- title: "Find the number of followers on LinkedIn"
-- details: "Go to the official link for autogen on the web and find the number of followers on LinkedIn"
-- agent_type: "WebSurfer"
-
-Please provide the plan from the conversation above in JSON format with the following structure:
-{
-    "task": "task description",
-    "steps": [
-        {
-            "title": "step title",
-            "details": "step details",
-            "agent_type": "WebSurfer" or "Coder"
+    /// 获取并验证 JSON 响应
+    async fn get_json_response(&self, json_content: &str) -> Result<Plan> {
+        // 1. 解析 JSON
+        let json_response: Value = serde_json::from_str(json_content)
+            .map_err(|e| anyhow!("Failed to parse JSON response: {}", e))?;
+        
+        // 2. 验证 JSON 结构
+        if !validate_plan_json(&json_response, self.sentinel_tasks_enabled) {
+            return Err(anyhow!("Invalid plan JSON structure"));
         }
-    ]
-}
-
-Again, DO NOT memorize the final answer in the plan.
-        "###.to_string()
+        
+        // 3. 检查 needs_plan 字段
+        let needs_plan = json_response["needs_plan"].as_bool().unwrap_or(true);
+        
+        if !needs_plan {
+            // 不需要计划，直接返回响应
+            let response = json_response["response"].as_str().unwrap_or("无需计划。");
+            println!("{}", response.bright_cyan());
+            return Err(anyhow!("No plan needed: {}", response));
+        }
+        
+        // 4. 将 JSON 中的 steps 转化为 Plan 对象
+        let plan = Plan::from_json(&json_response)?;
+        
+        // 5. 显示计划给用户
+        println!("{}", "\n=== 生成的计划 ===".bright_green().bold());
+        println!("{}", plan.to_display_string());
+        
+        Ok(plan)
     }
 
-    /// 解析LLM返回的计划内容
-    fn parse_plan_response(&self, plan_content: &str) -> Result<Plan> {
-        let plan_data: Value = serde_json::from_str(plan_content)?;
+    /// 重新规划
+    pub async fn replan(&self, original_input: &str) -> Result<Plan> {
+        println!("{}", "正在重新规划...".bright_cyan().bold());
         
-        let task = plan_data["task"]
-            .as_str()
-            .unwrap_or("Generated task")
-            .to_string();
+        // 重新生成计划，可以加入一些优化逻辑
+        let new_plan = self.generate_plan_from_input(original_input).await?;
         
-        let mut steps = Vec::new();
+        println!("{}", "重新规划完成！".bright_cyan());
+        Ok(new_plan)
+    }
+
+    /// 增加步骤
+    pub async fn add_steps(&self, _current_plan: &Plan, _additional_requirements: &str) -> Result<Plan> {
+        println!("{}", "正在增加步骤...".bright_blue().bold());
+        println!("{}", "功能未实现 - 需要实现基于LLM的步骤增加逻辑".yellow());
         
-        if let Some(steps_array) = plan_data["steps"].as_array() {
-            for step_data in steps_array {
-                let title = step_data["title"].as_str().unwrap_or("Untitled").to_string();
-                let details = step_data["details"].as_str().unwrap_or("").to_string();
-                let agent_type_str = step_data["agent_type"].as_str().unwrap_or("WebSurfer");
-                
-                let agent_type = match agent_type_str {
-                    "Coder" => AgentType::Coder,
-                    _ => AgentType::WebSurfer,
-                };
-                
-                steps.push(PlanStep::new(title, details, agent_type));
-            }
-        }
+        // TODO: 实现步骤增加逻辑
+        // 1. 分析当前计划
+        // 2. 理解额外需求
+        // 3. 生成新的步骤
+        // 4. 合并到现有计划中
         
-        Ok(Plan::new(task, steps))
+        Err(anyhow!("功能未实现"))
+    }
+
+    /// 修改计划
+    pub async fn modify_plan(&self, _current_plan: &Plan, _modification_request: &str) -> Result<Plan> {
+        println!("{}", "正在修改计划...".bright_magenta().bold());
+        println!("{}", "功能未实现 - 需要实现基于LLM的计划修改逻辑".yellow());
+        
+        // TODO: 实现计划修改逻辑
+        // 1. 分析修改请求
+        // 2. 识别需要修改的步骤
+        // 3. 生成修改后的步骤
+        // 4. 更新计划
+        
+        Err(anyhow!("功能未实现"))
     }
 }
