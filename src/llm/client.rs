@@ -2,7 +2,7 @@ use anyhow::Result;
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::env;
-use crate::types::{LlmMessage, LlmResponse, Choice};
+use crate::agents::plan_agent::{LlmMessage, LlmResponse, Choice};
 
 pub struct LlmClient {
     client: Client,
@@ -67,8 +67,10 @@ impl LlmClient {
                 message: LlmMessage {
                     role: "assistant".to_string(),
                     content: content.to_string(),
-                }
-            }]
+                },
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: None,
         };
 
         Ok(llm_response)

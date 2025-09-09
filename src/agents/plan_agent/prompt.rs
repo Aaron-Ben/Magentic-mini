@@ -1,7 +1,4 @@
 use chrono::Local;
-use serde_json::Value;
-use crate::types::{ChatMessage, Role, ContentPart};
-use chrono::Utc;
 
 // 系统指令提示词
 pub fn system_message_planning(sentinel_tasks_enabled: bool) -> String {
@@ -327,101 +324,6 @@ Helpful tips:
     };
 
     base_message + step_types_section + examples_section
-}
-
-/// 验证计划 JSON 响应
-pub fn validate_plan_json(
-    json_response: &Value,
-    sentinel_tasks_enabled: bool,
-) -> bool {
-    if !json_response.is_object() {
-        return false;
-    }
-
-    let obj = json_response.as_object().unwrap();
-    
-    // 检查必需的字段
-    let required_keys = ["task", "steps", "needs_plan", "response", "plan_summary"];
-    for key in required_keys.iter() {
-        if !obj.contains_key(*key) {
-            return false;
-        }
-    }
-
-    // 验证 steps 数组
-    if let Some(steps) = obj.get("steps").and_then(|v| v.as_array()) {
-        for step in steps {
-            if !step.is_object() {
-                return false;
-            }
-            
-            let step_obj = step.as_object().unwrap();
-            
-            // 检查基本字段
-            let basic_fields = ["title", "details", "agent_name"];
-            for field in basic_fields.iter() {
-                if !step_obj.contains_key(*field) {
-                    return false;
-                }
-            }
-            
-            // 根据 sentinel_tasks_enabled 模式进行不同的验证
-            if sentinel_tasks_enabled {
-                // 如果有 step_type 字段，说明这是 SentinelPlanStep
-                if let Some(step_type) = step_obj.get("step_type") {
-                    if step_type.as_str() == Some("SentinelPlanStep") {
-                        // SentinelPlanStep 需要额外的字段
-                        let sentinel_fields = ["sleep_duration", "condition"];
-                        for field in sentinel_fields.iter() {
-                            if !step_obj.contains_key(*field) {
-                                return false;
-                            }
-                        }
-                    }
-                }
-                // 如果没有 step_type，说明这是普通的 PlanStep，只需要基本字段
-            }
-            // 非 sentinel 模式下，只需要基本字段即可
-        }
-    } else {
-        return false;
-    }
-    
-    true
-}
-
-/// 创建系统消息
-pub fn create_system_message(sentinel_tasks_enabled: bool) -> ChatMessage {
-    ChatMessage {
-        role: Role::System,
-        content: vec![ContentPart::Text { 
-            text: system_message_planning(sentinel_tasks_enabled) 
-        }],
-        name: None,
-        timestamp: Some(Utc::now()),
-    }
-}
-
-/// 创建用户消息
-pub fn create_user_message(content: String, source: String) -> ChatMessage {
-    ChatMessage {
-        role: Role::User,
-        content: vec![ContentPart::Text { text: content }],
-        name: Some(source),
-        timestamp: Some(Utc::now()),
-    }
-}
-
-/// 创建计划指令消息（来自 orchestrator）
-pub fn create_plan_instruction_message(sentinel_tasks_enabled: bool) -> ChatMessage {
-    ChatMessage {
-        role: Role::User,
-        content: vec![ContentPart::Text { 
-            text: plan_prompt_json(sentinel_tasks_enabled) 
-        }],
-        name: Some("orchestrator".to_string()),
-        timestamp: Some(Utc::now()),
-    }
 }
 
 // 计划指令提示词

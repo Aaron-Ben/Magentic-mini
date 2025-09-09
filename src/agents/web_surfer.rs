@@ -1,6 +1,6 @@
-use crate::types::Plan;
 use anyhow::Result;
 use colored::*;
+use crate::agents::plan_agent::types::Plan;
 
 pub struct WebSurfer {
     
