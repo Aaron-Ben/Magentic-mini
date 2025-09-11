@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use headless_chrome::Tab;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DOMRectangle {
@@ -67,4 +69,32 @@ lazy_static::lazy_static! {
         map.insert("win", "Meta");
         map
     };
+}
+
+/// 标签页信息结构体
+#[derive(Clone)]
+pub struct TabInfo {
+    /// 标签页引用
+    pub tab: Arc<Tab>,
+    /// 标签页ID（用于识别）
+    pub id: String,
+    /// 页面标题
+    pub title: String,
+    /// 页面URL
+    pub url: String,
+    /// 是否为活跃标签页
+    pub is_active: bool,
+}
+
+/// 标签页操作结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TabSummary {
+    /// 标签页ID
+    pub id: String,
+    /// 页面标题
+    pub title: String,
+    /// 页面URL
+    pub url: String,
+    /// 是否为活跃标签页
+    pub is_active: bool,
 }
