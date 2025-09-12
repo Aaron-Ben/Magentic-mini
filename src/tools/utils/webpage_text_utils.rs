@@ -51,18 +51,22 @@ impl WebpageTextUtils {
     }
 
     pub async fn get_visible_text(&self, tab: &Arc<Tab>) -> String {
-        let _ = tab.evaluate(&self.page_script, false);
+        
+        if let Err(e) = tab.evaluate(&self.page_script, false) {
+            eprintln!("Failed to evaluate page_script.js: {:?}", e);
+        }
 
-        let result = tab.evaluate("WebSurfer.getVisibleText();", false);
+        let result = tab.evaluate("WebSurfer.getVisibleText();", true);
+
         match result {
-            Ok(eval_result) => {
-                if let Some(value) = eval_result.value {
-                    serde_json::from_value::<String>(value).unwrap_or_default()
-                } else {
-                    String::new()
-                }
+            Ok(eval_result) => eval_result
+                .value
+                .and_then(|value| serde_json::from_value::<String>(value).ok())
+                .unwrap_or_default(),
+            Err(e) => {
+                eprintln!("Failed to evaluate WebSurfer.getVisibleText(): {:?}", e);
+                String::new()
             }
-            Err(_) => String::new(),
         }
     }
 

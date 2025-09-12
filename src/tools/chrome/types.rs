@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use headless_chrome::Tab;
+use headless_chrome::{Tab};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DOMRectangle {
@@ -15,7 +15,7 @@ pub struct DOMRectangle {
     pub left: f64,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct VisualViewport {
     pub height: f64,
     pub width: f64,
@@ -30,7 +30,7 @@ pub struct VisualViewport {
     pub scroll_height: f64,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct InteractiveRegion {
     pub tag_name: String,
     pub role: String,
@@ -39,62 +39,36 @@ pub struct InteractiveRegion {
     pub rects: Vec<DOMRectangle>,
 }
 
-lazy_static::lazy_static! {
-    pub static ref CUA_KEY_TO_CHROMIUM_KEY: HashMap<&'static str, &'static str> = {
-        let mut map = HashMap::new();
-        map.insert("/", "Divide");
-        map.insert("\\", "Backslash");
-        map.insert("alt", "Alt");
-        map.insert("arrowdown", "ArrowDown");
-        map.insert("arrowleft", "ArrowLeft");
-        map.insert("arrowright", "ArrowRight");
-        map.insert("arrowup", "ArrowUp");
-        map.insert("backspace", "Backspace");
-        map.insert("capslock", "CapsLock");
-        map.insert("cmd", "Meta");
-        map.insert("ctrl", "Control");
-        map.insert("delete", "Delete");
-        map.insert("end", "End");
-        map.insert("enter", "Enter");
-        map.insert("esc", "Escape");
-        map.insert("home", "Home");
-        map.insert("insert", "Insert");
-        map.insert("option", "Alt");
-        map.insert("pagedown", "PageDown");
-        map.insert("pageup", "PageUp");
-        map.insert("shift", "Shift");
-        map.insert("space", " ");
-        map.insert("super", "Meta");
-        map.insert("tab", "Tab");
-        map.insert("win", "Meta");
-        map
-    };
-}
-
-/// 标签页信息结构体
 #[derive(Clone)]
 pub struct TabInfo {
-    /// 标签页引用
+    // 适用于多线程的环境中，Tab 对象需要在多个组件间共享
     pub tab: Arc<Tab>,
-    /// 标签页ID（用于识别）
-    pub id: String,
-    /// 页面标题
+    // 对于headless_chrome来说，并不直接提供一个有序的列表来访问标签页。相反，通常使用标签页的 ID 来进行操作
+    // 这里仿写一个index
+    pub index: usize,
     pub title: String,
-    /// 页面URL
     pub url: String,
-    /// 是否为活跃标签页
     pub is_active: bool,
+    pub is_controlled: bool,
 }
 
-/// 标签页操作结果
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TabSummary {
-    /// 标签页ID
-    pub id: String,
-    /// 页面标题
-    pub title: String,
-    /// 页面URL
-    pub url: String,
-    /// 是否为活跃标签页
-    pub is_active: bool,
+impl TabInfo{
+    pub fn new(tab: Arc<Tab>, index: usize, title: String, url: String, is_active: bool) -> Self {
+        Self {
+            tab,
+            index,
+            title,
+            url,
+            is_active,
+            is_controlled: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PageMetadata {
+    #[serde(rename = "jsonID")]
+    pub json_id: Option<serde_json::Value>,
+    pub microdata: Option<serde_json::Value>,
+    pub meta_tags: Option<HashMap<String, String>>,
 }

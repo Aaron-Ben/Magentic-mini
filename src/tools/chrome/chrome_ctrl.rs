@@ -1,29 +1,58 @@
-use headless_chrome::browser::tab;
+use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption;
 use headless_chrome::{Browser, LaunchOptions, Tab};
 use std::sync::Arc;
 use tracing::{info, warn};
-use anyhow::{Result, Context};
+use anyhow::{anyhow, Context, Result};
 use std::time::Duration;
 use tokio::time::sleep;
 use std::collections::HashMap;
-use uuid::Uuid;
-use std::fs;
-use std::path::Path;
-use crate::tools::chrome::types::{TabInfo, TabSummary, InteractiveRegion};
+use lazy_static::lazy_static;
+use crate::tools::chrome::types::{TabInfo,InteractiveRegion, VisualViewport, PageMetadata};
+use crate::tools::utils::webpage_text_utils::WebpageTextUtils;
+
+lazy_static! {
+    pub static ref CUA_KEY_TO_CHROMIUM_KEY: HashMap<&'static str, &'static str> = {
+        let mut map = HashMap::new();
+        map.insert("/", "Divide");
+        map.insert("\\", "Backslash");
+        map.insert("alt", "Alt");
+        map.insert("arrowdown", "ArrowDown");
+        map.insert("arrowleft", "ArrowLeft");
+        map.insert("arrowright", "ArrowRight");
+        map.insert("arrowup", "ArrowUp");
+        map.insert("backspace", "Backspace");
+        map.insert("capslock", "CapsLock");
+        map.insert("cmd", "Meta");
+        map.insert("ctrl", "Control");
+        map.insert("delete", "Delete");
+        map.insert("end", "End");
+        map.insert("enter", "Enter");
+        map.insert("esc", "Escape");
+        map.insert("home", "Home");
+        map.insert("insert", "Insert");
+        map.insert("option", "Alt");
+        map.insert("pagedown", "PageDown");
+        map.insert("pageup", "PageUp");
+        map.insert("shift", "Shift");
+        map.insert("space", " ");
+        map.insert("super", "Meta");
+        map.insert("tab", "Tab");
+        map.insert("win", "Meta");
+        map
+    };
+}
 
 /// Chrome 浏览器控制器
 pub struct Chrome {
     browser: Browser,
-    /// 当前活跃标签页
-    current_tab: Arc<Tab>,
-    /// 所有标签页的映射表
-    tabs: HashMap<String, TabInfo>,
+    /// 当前活跃标签页，当浏览器被最小化时，活跃的标签页为 None
+    current_tab: Option<Arc<Tab>>,
+    tabs: HashMap<usize, TabInfo>,
     /// 当前活跃标签页的ID
-    current_tab_id: String,
+    current_tab_id: Option<usize>,
 }
 
 impl Chrome {
-    /// 创建新的浏览器控制器实例
     pub fn new(headless: bool) -> Result<Self> {
 
         let launch_options = LaunchOptions::default_builder()
@@ -39,92 +68,104 @@ impl Chrome {
             .context("创建新标签页失败")?;
 
         // 创建第一个标签页的信息
-        let tab_id = Uuid::new_v4().to_string();
+        let tab_id = 1; 
         let tab_info = TabInfo {
             tab: tab.clone(),
-            id: tab_id.clone(),
+            index: 0,
             title: "新标签页".to_string(),
-            url: "www.google.com".to_string(),
+            url: String::from("www.google.com"),
             is_active: true,
+            is_controlled: false,
         };
 
         let mut tabs = HashMap::new();
-        tabs.insert(tab_id.clone(), tab_info);
+        tabs.insert(tab_id, tab_info);
 
         info!("Chrome 浏览器启动成功");
         
         Ok(Self {
             browser,
-            current_tab: tab,
+            current_tab: Some(tab),
             tabs,
-            current_tab_id: tab_id,
+            current_tab_id: Some(tab_id),
         })
     }
 
-    /// 导航到指定 URL
+
+    /// 页面导航与管理
+    // 导航到指定的URL，而且智能处理下载文件，将下载的文件保存到指定的文件夹，并显示确认的页面
+    pub fn visit_page() -> Result<()> { 
+        Ok(())
+    }
+
+    // 导航到指定 URL
     pub fn navigate_to(&mut self, url: &str) -> Result<()> {
-        
-        self.current_tab.navigate_to(url)
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+            
+        tab.navigate_to(url)
             .with_context(|| format!("导航到 {} 失败", url))?;
             
-        self.current_tab.wait_until_navigated()
+        tab.wait_until_navigated()
             .context("等待页面导航完成失败")?;
-            
-        self.update_current_tab_info()?;
             
         info!("成功导航到: {}", url);
         Ok(())
     }
 
-    /// 后退
     pub fn go_back(&mut self) -> Result<()> {
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
         
-        // 后退操作
-        self.current_tab.evaluate("window.history.back()", false)
+        tab.evaluate("window.history.back()", false)
             .context("执行后退操作失败")?;
             
-        self.current_tab.wait_until_navigated()
+        tab.wait_until_navigated()
             .context("等待后退页面加载完成失败")?;
             
-        self.update_current_tab_info()?;
         Ok(())
     }
 
-    /// 前进
     pub fn go_forward(&mut self) -> Result<()> {
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
 
-        // 前进操作
-        self.current_tab.evaluate("window.history.forward()", false)
+        tab.evaluate("window.history.forward()", false)
             .context("执行前进操作失败")?;
             
-        self.current_tab.wait_until_navigated()
+        tab.wait_until_navigated()
             .context("等待前进页面加载完成失败")?;
             
-        self.update_current_tab_info()?;
         Ok(())
     }
 
-    /// 刷新页面
     pub fn refresh(&mut self) -> Result<()> {
-        self.current_tab.reload(false, None)
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+            
+        tab.reload(false, None)
             .context("刷新页面失败")?;
             
-        self.current_tab.wait_until_navigated()
+        tab.wait_until_navigated()
             .context("等待刷新页面加载完成失败")?;
             
-        self.update_current_tab_info()?;
         Ok(())
     }
 
     /// 获取当前页面的 URL
     pub fn get_current_url(&self) -> Result<String> {
-        let url = self.current_tab.get_url();
-        Ok(url)
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+            
+        Ok(tab.get_url())
     }
 
     /// 获取当前页面的标题
     pub fn get_page_title(&self) -> Result<String> {
-        let result = self.current_tab.evaluate("document.title", false)
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+            
+        let result = tab.evaluate("document.title", false)
             .context("获取页面标题失败")?;
             
         let title = result.value
@@ -146,57 +187,135 @@ impl Chrome {
         sleep(Duration::from_secs(seconds)).await;
     }
 
+    pub fn create_tab_id(&self) -> usize {
+        self.tabs.len() + 1
+    }
+
+    pub fn reindex_tabs(&mut self) {
+        for (index, (_, tab_info)) in self.tabs.iter_mut().enumerate() {
+            tab_info.index = index;
+        }
+    }
+
     /// 创建新的标签页
-    pub fn new_tab(&mut self) -> Result<String> {
+    pub fn new_tab(&mut self, url: &str) -> Result<TabInfo> {
         let new_tab = self.browser.new_tab()
             .context("创建新标签页失败")?;
             
-        let tab_id = Uuid::new_v4().to_string();
-        let tab_info = TabInfo {
-            tab: new_tab,
-            id: tab_id.clone(),
-            title: "新标签页".to_string(),
-            url: "www.google.com".to_string(),
-            is_active: false,
+        new_tab.wait_until_navigated()
+            .context("等待新标签页加载完成失败")?;
+
+        // 激活标签页，使其成为当前活动的标签页
+        let navigate_result = new_tab.navigate_to(url);
+        let url_result = match navigate_result {
+            Ok(_) => {
+                new_tab.wait_until_navigated().context("等待新标签页加载完成失败")?;
+                new_tab.get_url()
+            }
+            Err(_) => String::new(),
         };
+
+        let title = new_tab.get_title().unwrap_or_default();
+        let index = self.tabs.len();
+        let tab_id = self.create_tab_id();
+        let tab_info = TabInfo::new(new_tab, index, title, url_result, true);
+
+        // 更新当前活跃标签页状态
+        if let Some(current_tab_id) = self.current_tab_id {
+            if let Some(current_tab_info) = self.tabs.get_mut(&current_tab_id) {
+                current_tab_info.is_active = false;
+            }
+        }
+
+        // 插入新标签页
+        self.tabs.insert(tab_id, tab_info.clone());
+        self.current_tab_id = Some(tab_id);
+        self.current_tab = Some(tab_info.tab.clone());
+
+        info!("创建新标签页: ID={}, URL={}", tab_id, url);
+
+        Ok(tab_info)
+    }
+
+    /// 获取所有标签页的信息
+    /// 
+    /// 返回一个包含所有标签页信息的列表，每个标签页信息包含：
+    /// - index: 标签页的位置索引
+    /// - title: 标签页的标题
+    /// - url: 标签页的URL
+    /// - is_active: 标签页是否当前可见
+    /// - is_controlled: 标签页是否被当前控制
+    pub async fn get_tabs_information(&self) -> Result<Vec<TabInfo>> {
+        let mut tabs_info = Vec::new();
         
-        self.tabs.insert(tab_id.clone(), tab_info);
-        Ok(tab_id)
+        // 遍历所有标签页
+        for (tab_id, tab_info) in &self.tabs {
+            // 获取标签页的可见状态
+            let is_visible = tab_info.tab.evaluate("document.visibilityState", false)
+                .ok()
+                .and_then(|r| r.value)
+                .and_then(|v| v.as_str().map(|s| s == "visible"))
+                .unwrap_or(false);
+                
+            let title = tab_info.tab.get_title().unwrap_or_default();
+            let url = tab_info.tab.get_url();
+            
+            // 更新标签页信息
+            let info = TabInfo {
+                tab: tab_info.tab.clone(),
+                index: tab_info.index,
+                title,
+                url,
+                is_active: is_visible,
+                is_controlled: Some(*tab_id) == self.current_tab_id,
+            };
+            
+            tabs_info.push(info);
+        }
+        
+        // 按索引排序
+        tabs_info.sort_by_key(|info| info.index);
+        
+        Ok(tabs_info)
     }
     
     /// 切换到指定标签页
-    pub fn switch_to_tab(&mut self, tab_id: &str) -> Result<()> {
-        info!("正在切换到标签页: {}", tab_id);
-        
-        let tab_info = self.tabs.get(tab_id)
-            .ok_or_else(|| anyhow::anyhow!("标签页 {} 不存在", tab_id))?
+    pub fn switch_tab(&mut self, tab_id: usize) -> Result<()> {
+        let tabs_info = self.tabs.get(&tab_id)
+            .ok_or_else(|| anyhow!("标签页 {} 不存在", tab_id))?
             .clone();
             
         // 更新标签页的活跃状态
-        if let Some(current_tab_info) = self.tabs.get_mut(&self.current_tab_id) {
-            current_tab_info.is_active = false;
+        if let Some(current_id) = self.current_tab_id {
+            if let Some(current_tab_info) = self.tabs.get_mut(&current_id) {
+                current_tab_info.is_active = false;
+            }
         }
-        
-        self.current_tab = tab_info.tab.clone();
-        self.current_tab_id = tab_id.to_string();
-        
-        if let Some(new_current_tab_info) = self.tabs.get_mut(tab_id) {
-            new_current_tab_info.is_active = true;
+
+        // 设置新的活跃标签页
+        self.current_tab = Some(tabs_info.tab.clone());
+        self.current_tab_id = Some(tab_id);
+
+        if let Some(new_tab_info) = self.tabs.get_mut(&tab_id) {
+            new_tab_info.is_active = true;
         }
-        
+
+        tabs_info.tab
+            .activate()
+            .context("激活标签页失败")?;
+
         info!("成功切换到标签页: {}", tab_id);
         Ok(())
     }
     
     /// 关闭指定标签页
-    pub fn close_tab(&mut self, tab_id: &str) -> Result<()> {
-        
+    pub fn close_tab(&mut self, tab_id: usize) -> Result<()> {
         if self.tabs.len() <= 1 {
-            return Err(anyhow::anyhow!("无法关闭最后一个标签页"));
+            return Err(anyhow!("无法关闭最后一个标签页"));
         }
         
-        let tab_info = self.tabs.remove(tab_id)
-            .ok_or_else(|| anyhow::anyhow!("标签页 {} 不存在", tab_id))?;
+        let tab_info = self.tabs.remove(&tab_id)
+            .ok_or_else(|| anyhow!("标签页 {} 不存在", tab_id))?;
             
         // 关闭标签页
         if let Err(e) = tab_info.tab.close(false) {
@@ -204,102 +323,123 @@ impl Chrome {
         }
         
         // 如果关闭的是当前活跃标签页，切换到第一个可用标签页
-        if tab_id == self.current_tab_id {
-            if let Some((first_tab_id, _)) = self.tabs.iter().next() {
-                let first_tab_id = first_tab_id.clone();
-                self.switch_to_tab(&first_tab_id)?;
-            }
+        if let Some((new_tab_id, _)) = self.tabs.iter().next() {
+            let new_tab_id = *new_tab_id;
+            self.switch_tab(new_tab_id)?;
+        } else {
+            self.current_tab_id = None;
+            self.current_tab = None;
         }
+
+        self.reindex_tabs();
         
         info!("标签页 {} 已关闭", tab_id);
         Ok(())
     }
-    
-    /// 获取所有标签页的摘要信息
-    pub fn get_tabs_summary(&self) -> Result<Vec<TabSummary>> {
-        let mut summaries = Vec::new();
-        
-        for tab_info in self.tabs.values() {
-            let summary = TabSummary {
-                id: tab_info.id.clone(),
-                title: tab_info.title.clone(),
-                url: tab_info.url.clone(),
-                is_active: tab_info.is_active,
-            };
-            summaries.push(summary);
-        }
-        
-        // 按活跃状态排序，活跃的在前
-        summaries.sort_by(|a, b| b.is_active.cmp(&a.is_active));
-        
-        Ok(summaries)
-    }
-    
-    /// 获取当前活跃标签页的ID
-    pub fn get_current_tab_id(&self) -> &str {
-        &self.current_tab_id
-    }
-    
-    /// 获取标签页数量
-    pub fn get_tab_count(&self) -> usize {
-        self.tabs.len()
-    }
-    
-    /// 获取所有标签页的详细信息（包括浏览器内部标签页）
-    pub fn get_all_tabs(&self) -> Result<Vec<TabSummary>> {
-        // 获取浏览器中的所有标签页
-        let browser_tabs = self.browser.get_tabs()
-            .lock()
-            .map_err(|e| anyhow::anyhow!("获取浏览器标签页列表失败: {:?}", e))?;
-            
-        let mut all_tabs = Vec::new();
-        
-        for (index, tab) in browser_tabs.iter().enumerate() {
-            let url = tab.get_url();
-            let title_result = tab.evaluate("document.title", false);
-            
-            let title = match title_result {
-                Ok(result) => {
-                    result.value
-                        .and_then(|v| v.as_str().map(|s| s.to_string()))
-                        .unwrap_or_else(|| "无标题".to_string())
-                }
-                Err(_) => "无法获取标题".to_string(),
-            };
-            
-            // 检查是否为当前活跃标签页
-            let is_active = self.tabs.values()
-                .any(|tab_info| {
-                    Arc::ptr_eq(&tab_info.tab, tab) && tab_info.is_active
-                });
-            
-            all_tabs.push(TabSummary {
-                id: format!("browser_tab_{}", index),
-                title,
-                url,
-                is_active,
-            });
-        }
-        
-        Ok(all_tabs)
-    }
-    
-    /// 更新当前标签页信息
-    fn update_current_tab_info(&mut self) -> Result<()> {
-        let url = self.get_current_url()?;
-        let title = self.get_page_title()?;
-        
-        if let Some(tab_info) = self.tabs.get_mut(&self.current_tab_id) {
-            tab_info.url = url;
-            tab_info.title = title;
-        }
-        
+
+    /// 元素交互
+    // 点击具有特定 __elementId 属性的元素。它能处理右键点击、按住点击、在单标签模式下阻止新窗口打开，以及检测点击后触发的下载或新页面
+    pub fn click_element(&mut self, _element_id: &str) -> Result<()> { 
         Ok(())
     }
 
-    // 获取截图
+    // 向输入框、文本区域或下拉框填充文本。支持先删除现有文本和在输入后按回车键
+    pub fn fill_text (&mut self, _element_id: &str, _text: &str) -> Result<()> {
+        Ok(())
+    }
+
+    // 鼠标悬停在指定的元素上
+    pub fn hover_element(&mut self, _element_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    // 选择下拉菜单选项
+    pub fn select_option(&mut self, _element_id: &str, _option_text: &str) -> Result<()> {
+        Ok(())
+    }
+
+    // 向输入框上传本地文件
+    pub fn upload_file(&mut self, _element_id: &str, _file_path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// 页面滚动
+    pub fn page_up() -> Result<()> {
+        Ok(())
+    }
+
+    pub fn page_down() -> Result<()> {
+        Ok(())
+    }
+
+
+
+    // 鼠标操作
+    pub fn click_coords(&self) -> Result<()> {
+        Ok(())
+    }
+
+    pub fn double_coords() -> Result<()> {
+        Ok(())
+    }
+
+    pub fn hover_coords() -> Result<()> {
+        Ok(())
+    }
+
+    pub fn drag_coords() -> Result<()> {
+        Ok(())
+    }
+
+    pub fn scroll_coords() -> Result<()> {
+        Ok(())
+    }
+
+    // 键盘操作
+    pub fn keypress(&self, keys: Vec<&str>) -> Result<()> {
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+
+        tab.wait_until_navigated()
+            .context("等待页面导航完成失败")?;
+        let mapped_keys: Vec<&str> = keys
+            .into_iter()
+            .map(|key| {
+                CUA_KEY_TO_CHROMIUM_KEY
+                .get(key.to_lowercase().as_str())
+                .copied()
+                .unwrap_or(key)
+        })
+        .collect();
+
+        for key in &mapped_keys {
+            let js = format!(
+                "document.dispatchEvent(new KeyboardEvent('keydown', {{key: '{}'}}));",
+                key
+            );
+            tab.evaluate(&js, false)
+                .context("Failed to press key")?;
+        }
+
+        for key in mapped_keys.iter().rev() {
+            let js = format!(
+                    "document.dispatchEvent(new KeyboardEvent('keyup', {{ key: '{}' }}));",
+                    key
+                );
+                tab.evaluate(&js, false)
+                    .context("Failed to dispatch keyup event")?;
+        }
+
+        Ok(())
+    }
+
+    /// 获取页面的信息（非常重要的一系列方法）
+    // 获取当前页面的截图(仅仅字节信息即可)
     async fn get_screenshot(&self) -> Result<Vec<u8>> {
-        let screenshot = self.current_tab.capture_screenshot(
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+            
+        let screenshot = tab.capture_screenshot(
             headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png,
             None,
             None,
@@ -308,7 +448,187 @@ impl Chrome {
         Ok(screenshot)
     }
 
+    // 扫描页面并返回所有可交互元素的位置，大小和类型信息，这些元素会被注入一个唯一的__elementId,以便后续操作
+    async fn get_interactive_rects(&self) -> Result<InteractiveRegion> {
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+
+        // 注入
+        let script_path = std::path::Path::new(file!())
+            .parent()
+            .unwrap()
+            .join("page_script.js");
+        let page_script = std::fs::read_to_string(script_path)
+            .unwrap_or_else(|_| String::new());
+        
+        // 执行
+        if let Err(e) = tab.evaluate(&page_script, false) {
+            warn!("Failed to inject page script: {:?}", e);
+        }
+        
+        // 获取交互区域
+        let result = tab.evaluate("WebSurfer.getInteractiveRects();", false)
+            .context("Failed to get interactive rects")?;
+        
+        let interactive_rects = result.value
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        
+        Ok(interactive_rects)
+    }
+
+    // 获取当前适口的尺寸，缩放比例和滚动位置
+    async fn get_visual_viewport(&self) -> Result<VisualViewport> {
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+
+        let script_path = std::path::Path::new(file!())
+            .parent()
+            .unwrap()
+            .join("page_script.js");
+        let page_script = std::fs::read_to_string(script_path)
+            .unwrap_or_else(|_| String::new());
+
+        if let Err(e) = tab.evaluate(&page_script, false) {
+            warn!("Failed to inject page script: {:?}", e);
+        }
+
+        let result = tab.evaluate("WebSurfer.getVisualViewport();", false)
+            .context("Failed to get visual viewport")?;
+
+        let visual_viewport = result.value
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+
+        Ok(visual_viewport)
+    }
+
+    // 获取页面的元数据（title, mata等标签）
+    async fn get_page_metadata(&self) -> Result<PageMetadata> {
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+        
+        let script_path = std::path::Path::new(file!())
+            .parent()
+            .unwrap()
+            .join("page_script.js");
+
+        let page_script = std::fs::read_to_string(script_path).unwrap_or_else(|_| String::new());
+
+        if let Err(e) = tab.evaluate(&page_script, false) {
+            warn!("Failed to inject page script: {:?}", e);
+        }
+
+        // 获取元数据
+        let result = tab.evaluate("WebSurfer.getPageMetadata();", false)
+            .context("Failed to get page metadata")?;
+
+        let metadata: PageMetadata = result.value
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+
+        Ok(metadata)
+    }
+
+    // 获取整个页面的纯文本
+    async fn get_page_text(&self) -> Result<String> {
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+            
+        let utils = WebpageTextUtils::new();
+        let tab_arc = tab.clone();
+        let result = utils.get_all_webpage_text(&tab_arc, 50).await;
+        Ok(result)
+    }
+
+    // 获取当前视图的可见文本
+    pub async fn get_visible_text(&self, tab: &Arc<Tab>) -> Result<String> {
+        let utils = WebpageTextUtils::new();
+        let result = utils.get_visible_text(tab).await;
+        Ok(result)
+    }
+
+    // 转化为markdown
+    pub async fn convert_to_markdown(&self) -> Result<String> {
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+            
+        let utils = WebpageTextUtils::new();
+        let tab_arc = tab.clone();
+        let result = utils.get_page_markdown(&tab_arc, 50).await;
+        Ok(result)
+    }
+
+    // 生成一个包含页面标题，URL，滚动位置，可见文本和元数据的综合描述，用以向AI代理汇报当前的状态
+    pub async fn describe_page(&self, get_screenshot: bool) -> (String, Option<Vec<u8>>, String) {
+        let tab = if let Some(tab) = self.current_tab.as_ref() {
+            let _ = tab.wait_until_navigated();
+            tab
+        } else {
+            return (String::from("No active tab"), None, String::from(""));
+        };
+
+        // 截图
+        let screenshot = if get_screenshot {
+            tab.capture_screenshot(CaptureScreenshotFormatOption::Png, None, None, false)
+                .ok()
+        } else {
+            None
+        };
+        
+
+        // 获取页面标题和URL
+        let page_title = self.get_page_title().unwrap_or_default();
+        let page_url = self.get_current_url().unwrap_or_default();
+        
+        // 获取视口信息
+        let viewport = self.get_visual_viewport().await.unwrap_or_default();
+        
+        // 获取可见文本
+        let visible_text = self.get_visible_text(tab).await.unwrap_or_default();
+        
+        // 获取页面元数据
+        let page_metadata = self.get_page_metadata().await.unwrap_or_default();
+        let metadata_json = serde_json::to_string_pretty(&page_metadata).unwrap_or_default();
+
+        // 使用简单的字符串长度作为哈希
+        let metadata_hash = format!("{:x}", metadata_json.len());
+
+        // 计算滚动位置百分比
+        let percent_visible = if viewport.scroll_height > 0.0 {
+            (viewport.height * 100.0 / viewport.scroll_height) as i32
+        } else {
+            100
+        };
+        
+        let percent_scrolled = if viewport.scroll_height > 0.0 {
+            (viewport.page_top * 100.0 / viewport.scroll_height) as i32
+        } else {
+            0
+        };
+        
+        // 确定位置描述
+        let position_text = if percent_scrolled < 1 {
+            String::from("at the top of the page")
+        } else if percent_scrolled + percent_visible >= 99 {
+            String::from("at the bottom of the page")
+        } else {
+            format!("{}% down from the top of the page", percent_scrolled)
+        };
+
+        // 构建描述消息
+        let message_content = format!(
+            "We are at the following webpage [{}]({}).\nThe viewport shows {}% of the webpage, and is positioned {}\nThe text in the viewport is:\n{}\nThe following metadata was extracted from the webpage:\n\n{}\n",
+            page_title, page_url, percent_visible, position_text, visible_text, metadata_json
+        );
+        
+        (message_content, screenshot, metadata_hash)
+    }
+ 
     async fn set_mark(&self) -> Result<()> {
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+            
         let js_script = r#"
             // 查询可交互元素
             const interactiveElements = document.querySelectorAll('a, button, input, select, textarea, [contenteditable], [onclick], [onchange]');
@@ -321,11 +641,14 @@ impl Chrome {
             
             interactiveElements.length;
         "#;
-        self.current_tab.evaluate(js_script, true)?;
+        tab.evaluate(js_script, true)?;
         Ok(())
     }
 
     async fn clear_mark(&self) -> Result<()> {
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+            
         let js_script = r#"
             // 获取所有已添加的边框元素
             const redBorderElements = document.querySelectorAll('[style*="border: 2px solid red"]');
@@ -335,7 +658,7 @@ impl Chrome {
                 el.style.border = '';
             });
         "#;
-        self.current_tab.evaluate(js_script, true)?;
+        tab.evaluate(js_script, true)?;
         Ok(())
     }
 
