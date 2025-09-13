@@ -7,7 +7,6 @@ use std::time::Duration;
 use tokio::time::sleep;
 use std::collections::HashMap;
 use lazy_static::lazy_static;
-use crate::agents::plan_agent::config;
 use crate::tools::chrome::types::{TabInfo,InteractiveRegion, VisualViewport, PageMetadata};
 use crate::tools::utils::webpage_text_utils::WebpageTextUtils;
 
@@ -421,6 +420,95 @@ impl Chrome {
 
     /// 元素交互
     // 点击具有特定 __elementId 属性的元素。它能处理右键点击、按住点击、在单标签模式下阻止新窗口打开，以及检测点击后触发的下载或新页面
+    pub async fn click_id(&mut self, _element_id: &str) -> Result<()> {
+        Ok(())
+    }
+    
+
+    // 寻找目标元素（很重要的方法，涉及多个步骤，未测试）
+    /* 其中element_id 代表页面上交互元素的唯一标识符，它是由 page_script.js 中扫描所有的交互元素
+       为交互元素分配唯一ID，然后 page_script.js 中的getInteractiveRects 返回所有交互元素及其
+       element_id, add_set_of_mark() 创建连续的数字ID映射到原始的elememt_id,工具参数使用ID
+       工具参数接收数字ID，通过element_id_mapping 转化为原始的element_id,hover_id 使用element_id
+       定位并操作元素
+       -JavaScript扫描 → page_script.js 识别交互元素并分配 __elementId
+       -元素信息收集 → playwright_controller.py 获取元素矩形和属性信息
+       -ID映射创建 → _set_of_mark.py 创建用户友好的数字ID映射
+       -工具调用 → _web_surfer.py 接收数字ID并转换为原始ID
+       -元素定位 → playwright_controller.py 使用 __elementId 定位元素
+       -动画执行 → animation_utils.py 执行光标动画和元素高亮
+       -鼠标悬停 → playwright_controller.py 执行实际的鼠标悬停操作
+       */
+    pub async fn hover_id(&mut self, element_id: &str) -> Result<()> {
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+        
+        tab.wait_until_navigated().context("等待页面导航完成失败")?;
+
+        // 1. 查找元素
+        let _element = tab
+            .wait_for_element(&format!(r#"[__elementId="{}"]"#, element_id))
+            .with_context(|| format!("未找到元素 ID 为 {} 的元素", element_id))?;
+
+        // 2. 添加黄色边框
+        let js_add_border = format!(
+            "document.getElementById('{}').style.border = '2px solid yellow';",
+            element_id
+        );
+        tab.evaluate(&js_add_border, false)
+            .context("添加黄色边框失败")?;
+
+        // 3. 确保元素在视图内
+        let js_scroll_into_view = format!(
+            "document.getElementById('{}').scrollIntoView({{ behavior: 'smooth', block: 'center', inline: 'center' }});",
+            element_id
+        );
+        tab.evaluate(&js_scroll_into_view, false)
+            .context("滚动元素到视图内失败")?;
+
+        // 4. 进行滚动
+        sleep(Duration::from_millis(800)).await;
+
+        // 5. 获取元素中心坐标
+        let js_get_center = format!(
+            "const el = document.getElementById('{}');
+            if (!el) throw new Error('Element not found');
+            const rect = el.getBoundingClientRect();
+            [rect.left + rect.width / 2, rect.top + rect.height / 2];", element_id
+        );
+
+        let coords: Vec<f64> = tab
+            .evaluate(&js_get_center, false)?
+            .value
+            .and_then(|v| v.as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.as_f64())
+                    .collect()
+                }))
+                .unwrap_or_default();
+
+        if coords.len() != 2 {
+            return Err(anyhow!("无法获取元素中心坐标"));
+        }
+
+        let center_x = coords[0] as i32;
+        let center_y = coords[1] as i32;
+
+        // 6. 在悬停前移除黄色边框
+        let js_remove_border = format!(
+            "document.getElementById('{}').style.border = '';",
+            element_id
+        );
+        tab.evaluate(&js_remove_border, false)
+            .context("移除黄色边框失败")?;
+
+        // 8.执行悬停
+        self.hover_coords(center_x, center_y)
+            .await
+            .context("悬停到元素中心失败")?;
+
+        Ok(())
+    }
 
     // 向输入框、文本区域或下拉框填充文本。支持先删除现有文本和在输入后按回车键
     pub fn fill_text (&mut self, _element_id: &str, _text: &str) -> Result<()> {
@@ -438,11 +526,94 @@ impl Chrome {
     }
 
     /// 页面滚动
-    pub fn page_up() -> Result<()> {
+    // 大范围
+    pub fn page_up(&self) -> Result<()> {
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+
+        tab.wait_until_navigated().context("等待页面导航完成失败")?;
+
+        let viewport_height = self.viewport_height;
+        let scroll_amount = -(viewport_height as f64 * 0.5);
+
+        let js_script = format!(
+            "window.scrollBy({{ top: {}, behavior: 'smooth' }});",
+            scroll_amount
+        );
+        tab.evaluate(&js_script, true)
+            .context("执行页面上滚动操作失败")?;
+        std::thread::sleep(Duration::from_millis(500)); // 等待滚动动画完成
+
         Ok(())
     }
 
-    pub fn page_down() -> Result<()> {
+    // 大范围
+    pub fn page_down(&self) -> Result<()> {
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+
+        tab.wait_until_navigated().context("等待页面导航完成失败")?;
+
+        let viewport_height = self.viewport_height;
+        let scroll_amount = viewport_height as f64 * 0.5;
+
+        let js_script = format!(
+            "window.scrollBy({{ top: {}, behavior: 'smooth' }});",
+            scroll_amount
+        );
+        tab.evaluate(&js_script, true)
+            .context("执行页面下滚动操作失败")?;
+        std::thread::sleep(Duration::from_millis(500)); // 等待滚动动画完成
+
+        Ok(())
+    }
+
+    // 可自定义范围
+    pub async fn scroll_custom(&mut self, dir: &str, pixels: Option<i32>) -> Result<()> {
+
+        let pixels = pixels.unwrap_or(400); // 默认滚动100像素
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+
+        tab.wait_until_navigated().context("等待页面导航完成失败")?;
+
+        let js_script = format!(
+            "window.scrollBy({{ top: {}, behavior: 'smooth' }});",
+            pixels * if dir == "up" { -1 } else { 1 }
+        );
+        tab.evaluate(&js_script, true)
+            .context("执行自定义滚动操作失败")?;
+        std::thread::sleep(Duration::from_millis(500)); // 等待滚动动画完成
+
+        Ok(())
+    }
+
+    // 滚动指定的元素，例如内部的滚动条
+    pub fn scroll_element(&mut self, element_id: &str, dir: &str, pixels: Option<i32>) -> Result<()> {
+        let pixels = pixels.unwrap_or(100); // 默认滚动100像素
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+
+        tab.wait_until_navigated().context("等待页面导航完成失败")?;
+
+        let js_script = format!(
+            r#"
+            (function() {{
+                const elem = document.querySelector('[__elementId="{}"]');
+                if (elem) {{
+                    elem.scrollBy({{ top: {}, behavior: 'smooth' }});
+                }} else {{
+                    throw new Error('元素未找到');
+                }}
+            }})()
+            "#,
+            element_id,
+            pixels * if dir == "up" { -1 } else { 1 }
+        );
+        tab.evaluate(&js_script, true)
+            .context("执行元素滚动操作失败")?;
+        std::thread::sleep(Duration::from_millis(500)); // 等待滚动动画完成
+
         Ok(())
     }
 
@@ -1230,3 +1401,18 @@ impl Chrome {
     }
 }
 
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    pub fn test_hover_id() {
+        let mut brower = Chrome::new(false).unwrap();
+        let tab = brower.current_tab.as_ref().unwrap();
+        tab.navigate_to("https://www.bilibili.com").unwrap();
+        tab.wait_until_navigated().unwrap();
+        let _ = brower.hover_id("primary-btn roll-btn");
+        std::thread::sleep(Duration::from_secs(5));
+    }
+}
