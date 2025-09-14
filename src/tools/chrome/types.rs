@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use headless_chrome::{Tab};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DOMRectangle {

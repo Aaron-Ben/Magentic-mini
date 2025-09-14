@@ -1,14 +1,8 @@
-use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption;
-use headless_chrome::{Browser, LaunchOptions, Tab};
+use thirtyfour::prelude::*;
+use std::error::Error;
 use std::sync::Arc;
-use tracing::{info, warn};
-use anyhow::{anyhow, Context, Result};
-use std::time::Duration;
-use tokio::time::sleep;
 use std::collections::HashMap;
 use lazy_static::lazy_static;
-use crate::tools::chrome::types::{TabInfo,InteractiveRegion, VisualViewport, PageMetadata};
-use crate::tools::utils::webpage_text_utils::WebpageTextUtils;
 
 lazy_static! {
     pub static ref CUA_KEY_TO_CHROMIUM_KEY: HashMap<&'static str, &'static str> = {
@@ -44,132 +38,81 @@ lazy_static! {
 
 /// Chrome 浏览器控制器
 pub struct Chrome {
-    browser: Browser,
-    /// 当前活跃标签页，当浏览器被最小化时，活跃的标签页为 None
-    current_tab: Option<Arc<Tab>>,
-    tabs: HashMap<usize, TabInfo>,
-    /// 当前活跃标签页的ID
-    current_tab_id: Option<usize>,
-    // 可能用到的配置字段
-    animate_actions: bool,
-    downloads_folder: Option<String>,
-    viewport_width: u32,
-    viewport_height: u32,
-    to_resize_viewport: bool,
-    timeout_load: f64,
-    sleep_after_action: f64,
-    single_tab_mode: bool,
-    // 页面脚本和工具
-    page_script: String,
-    text_utils: WebpageTextUtils,
-}
-
-#[derive(Debug)]
-pub struct ChromeConfig {
-    pub downloads_folder: Option<String>,
-    pub animate_actions: bool,
-    pub viewport_width: u32,
-    pub viewport_height: u32,
-    pub to_resize_viewport: bool,
-    pub timeout_load: f64,
-    pub sleep_after_action: f64,
-    pub single_tab_mode: bool,
-}
-
-impl Default for ChromeConfig {
-    fn default() -> Self {
-        Self {
-            downloads_folder: None,
-            animate_actions: false,
-            viewport_width: 1440,
-            viewport_height: 900,
-            to_resize_viewport: true,
-            timeout_load: 30.0,
-            sleep_after_action: 0.1,
-            single_tab_mode: false,
-        }
-    }
-    
+    driver: WebDriver,
 }
 
 impl Chrome {
-    pub fn new(headless: bool) -> Result<Self> {
-
-        let launch_options = LaunchOptions::default_builder()
-            .headless(headless)
-            .window_size(Some((1920, 1080)))
-            .build()
-            .context("构建浏览器启动选项失败")?;
-
-        let browser = Browser::new(launch_options)
-            .context("启动浏览器失败")?;
-
-        let tab = browser.new_tab()
-            .context("创建新标签页失败")?;
-
-        // 创建第一个标签页的信息
-        let tab_id = 1; 
-        let tab_info = TabInfo {
-            tab: tab.clone(),
-            index: 0,
-            title: "新标签页".to_string(),
-            url: String::from("https://www.google.com"),
-            is_active: true,
-            is_controlled: false,
-        };
-
-        let mut tabs = HashMap::new();
-        tabs.insert(tab_id, tab_info);
-
-        info!("Chrome 浏览器启动成功");
-        
-        Ok(Self {
-            browser,
-            current_tab: Some(tab),
-            tabs,
-            current_tab_id: Some(tab_id),
-            animate_actions: false,
-            downloads_folder: None,
-            viewport_width: 1440,
-            viewport_height: 1440,
-            to_resize_viewport: true,
-            timeout_load: 30.0,
-            sleep_after_action: 0.1,
-            single_tab_mode: false,
-            page_script: String::new(),
-            text_utils: WebpageTextUtils::new(),
-        })
+    pub async fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
+    let caps = DesiredCapabilities::chrome();
+        let driver = WebDriver::new("http://localhost:9515", caps).await?;
+        Ok(Self { driver })
     }
 
-    pub fn with_config(
-        mut self,
-        config: ChromeConfig,
-    ) -> Result<Self> {
-        // 验证配置参数
-        assert!(config.viewport_width > 0);
-        assert!(config.viewport_height > 0);
-        assert!(config.timeout_load > 0.0);
-
-        // 更新配置
-        self.animate_actions = config.animate_actions;
-        self.downloads_folder = config.downloads_folder;
-        self.viewport_width = config.viewport_width;
-        self.viewport_height = config.viewport_height;
-        self.to_resize_viewport = config.to_resize_viewport;
-        self.timeout_load = config.timeout_load;
-        self.sleep_after_action = config.sleep_after_action;
-        self.single_tab_mode = config.single_tab_mode;
-
-        // 加载页面脚本
-        let script_path = std::path::Path::new(file!())
-            .parent()
-            .unwrap()
-            .join("page_script.js");
-        self.page_script = std::fs::read_to_string(script_path)
-            .unwrap_or_default();
-
-        Ok(self)
+    async fn new_tab(&self, url: &str) -> Result<WindowHandle, Box<dyn Error + Send + Sync>> {
+        self.driver.execute(&format!("window.open('{}', '_blank');", url), vec![]).await?;
+        let handles = self.driver.windows().await?;
+        Ok(handles.last().ok_or("无法获取新标签页句柄")?.clone())
     }
+
+    async fn switch_to_tab(&self, handle: &WindowHandle) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.driver.switch_to_window(handle.clone()).await.map_err(|e|Box::new(e) as Box<dyn Error + Send + Sync>)
+    }
+
+    async fn close_tab(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.driver.close_window().await.map_err(|e|Box::new(e) as Box<dyn Error + Send + Sync>)
+    }
+
+    async fn quit(self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.driver.quit().await.map_err(|e|Box::new(e) as Box<dyn Error + Send + Sync>)
+    }
+
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use tokio::time::{sleep, Duration};
+
+    #[tokio::test]
+    async fn test_chrome() -> Result<(), Box<dyn Error + Send + Sync>> {
+        let chrome = Chrome::new().await?;
+        let tab1 = chrome.new_tab("https://www.bilibili.com").await?;
+        sleep(Duration::from_secs(2)).await;
+        let tab2 = chrome.new_tab("https://www.baidu.com").await?;
+        sleep(Duration::from_secs(2)).await;
+        let tab3 = chrome.new_tab("https://www.google.com").await?;
+        sleep(Duration::from_secs(2)).await;
+        chrome.switch_to_tab(&tab1).await?;
+        println!("B站标题: {}", chrome.driver.title().await?);
+        sleep(Duration::from_secs(2)).await;
+        chrome.switch_to_tab(&tab2).await?;
+        println!("百度标题: {}", chrome.driver.title().await?);
+        sleep(Duration::from_secs(2)).await;
+        chrome.switch_to_tab(&tab3).await?;
+        println!("谷歌标题: {}", chrome.driver.title().await?);
+        sleep(Duration::from_secs(2)).await;
+        chrome.switch_to_tab(&tab3).await?;
+        chrome.close_tab().await?;
+        sleep(Duration::from_secs(2)).await;
+
+        chrome.switch_to_tab(&tab2).await?;
+        chrome.close_tab().await?;
+        sleep(Duration::from_secs(2)).await;
+
+        chrome.switch_to_tab(&tab1).await?;
+        chrome.close_tab().await?;
+        sleep(Duration::from_secs(2)).await;
+
+        // 关闭浏览器
+        chrome.quit().await?;
+
+        Ok(())
+    }
+}
+
+/* 
+impl Chrome {
+
 
 
     /// 页面导航与管理
@@ -521,7 +464,17 @@ impl Chrome {
     }
 
     // 向输入框上传本地文件
-    pub fn upload_file(&mut self, _element_id: &str, _file_path: &str) -> Result<()> {
+    pub fn upload_file(&mut self, element_id: &str, file_path: &str) -> Result<()> {
+        let tab = self.current_tab.as_ref()
+            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
+        tab.wait_until_navigated().context("等待页面导航完成失败")?;
+
+        let srcipt = format!(r#"
+        
+        "#, element_id, file_path);
+        self.page_script
+            .replace("{{ELEMENT_ID}}", element_id)
+            .replace("{{FILE_PATH}}", file_path);
         Ok(())
     }
 
@@ -1415,4 +1368,5 @@ mod tests {
         let _ = brower.hover_id("primary-btn roll-btn");
         std::thread::sleep(Duration::from_secs(5));
     }
-}
+}*/
+

@@ -1,4 +1,3 @@
-use headless_chrome::{Browser, LaunchOptions, Tab};
 use std::sync::Arc;
 use tracing::{error, info};
 use anyhow::Result;

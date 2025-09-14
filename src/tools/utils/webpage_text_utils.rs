@@ -3,7 +3,6 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use headless_chrome::Tab;
 use html2md;
 use log::{error, info};
 use pdf_extract;

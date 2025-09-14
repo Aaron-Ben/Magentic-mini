@@ -1,4 +1,3 @@
-use headless_chrome::Tab;
 use std::sync::Arc;
 use std::time::Duration;
 

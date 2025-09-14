@@ -1,6 +1,3 @@
-use anyhow::{anyhow, Result};
-use headless_chrome::{Browser, Tab as HeadlessTab};
-use headless_chrome::protocol::cdp::Network::CookieParam;
 use log::{warn, error};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
