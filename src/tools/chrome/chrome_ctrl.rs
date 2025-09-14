@@ -1,69 +1,211 @@
-use thirtyfour::prelude::*;
 use std::error::Error;
 use std::sync::Arc;
-use std::collections::HashMap;
-use lazy_static::lazy_static;
-
-lazy_static! {
-    pub static ref CUA_KEY_TO_CHROMIUM_KEY: HashMap<&'static str, &'static str> = {
-        let mut map = HashMap::new();
-        map.insert("/", "Divide");
-        map.insert("\\", "Backslash");
-        map.insert("alt", "Alt");
-        map.insert("arrowdown", "ArrowDown");
-        map.insert("arrowleft", "ArrowLeft");
-        map.insert("arrowright", "ArrowRight");
-        map.insert("arrowup", "ArrowUp");
-        map.insert("backspace", "Backspace");
-        map.insert("capslock", "CapsLock");
-        map.insert("cmd", "Meta");
-        map.insert("ctrl", "Control");
-        map.insert("delete", "Delete");
-        map.insert("end", "End");
-        map.insert("enter", "Enter");
-        map.insert("esc", "Escape");
-        map.insert("home", "Home");
-        map.insert("insert", "Insert");
-        map.insert("option", "Alt");
-        map.insert("pagedown", "PageDown");
-        map.insert("pageup", "PageUp");
-        map.insert("shift", "Shift");
-        map.insert("space", " ");
-        map.insert("super", "Meta");
-        map.insert("tab", "Tab");
-        map.insert("win", "Meta");
-        map
-    };
-}
+use thirtyfour::{DesiredCapabilities,WebDriver, WindowHandle};
+use thirtyfour::error:: {WebDriverError,WebDriverErrorInfo};
+use crate::tools::utils::animation_utils::AnimationUtils;
 
 /// Chrome 浏览器控制器
 pub struct Chrome {
-    driver: WebDriver,
+    driver: Arc<WebDriver>,
+    anim_utils: AnimationUtils,
 }
 
 impl Chrome {
-    pub async fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
-    let caps = DesiredCapabilities::chrome();
+    pub async fn new() -> Result<Self, WebDriverError> {
+        let caps = DesiredCapabilities::chrome();
         let driver = WebDriver::new("http://localhost:9515", caps).await?;
-        Ok(Self { driver })
+        Ok(Self { 
+            driver: Arc::new(driver),
+            anim_utils: AnimationUtils::new(),
+        })
     }
 
+    /// 标签页的管理
     async fn new_tab(&self, url: &str) -> Result<WindowHandle, Box<dyn Error + Send + Sync>> {
-        self.driver.execute(&format!("window.open('{}', '_blank');", url), vec![]).await?;
+        let url = url.trim();
+        self.driver.execute(&format!("window.open('{}', 'www.google.com');", url), vec![]).await?;
         let handles = self.driver.windows().await?;
         Ok(handles.last().ok_or("无法获取新标签页句柄")?.clone())
     }
 
     async fn switch_to_tab(&self, handle: &WindowHandle) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.driver.switch_to_window(handle.clone()).await.map_err(|e|Box::new(e) as Box<dyn Error + Send + Sync>)
+        self.driver.switch_to_window(handle.clone()).await?;
+        Ok(())
     }
 
     async fn close_tab(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.driver.close_window().await.map_err(|e|Box::new(e) as Box<dyn Error + Send + Sync>)
+        self.driver.close_window().await?;
+        Ok(())
     }
 
-    async fn quit(self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.driver.quit().await.map_err(|e|Box::new(e) as Box<dyn Error + Send + Sync>)
+    async fn go_back(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.driver.back().await?;
+        Ok(())
+    }
+
+    async fn go_forward(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.driver.forward().await?;
+        Ok(())
+    }
+
+    async fn refresh(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.driver.refresh().await?;
+        Ok(())
+    }
+
+    /// 滚动管理
+    async fn page_up(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.driver.execute("window.scrollBy({ top: -window.innerHeight / 2, behavior: 'smooth' });", vec![]).await?;
+        Ok(())
+    }
+
+    async fn page_down(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.driver.execute("window.scrollBy({ top: window.innerHeight / 2, behavior: 'smooth' });", vec![]).await?;
+        Ok(())
+    }
+
+    async fn scroll_custom(&self, dir: &str, pixels: i32) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let scroll_amount = if dir == "up" { -pixels } else { pixels };
+        self.driver.execute(&format!("window.scrollBy({{ top: {}, behavior: 'smooth' }});", scroll_amount), vec![]).await?;
+        Ok(())
+    }
+
+    async fn scroll_element(&self, element_id: &str, dir: &str, pixels: i32) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let scroll_amount = if dir == "up" { -pixels } else { pixels };
+        let script = format!(
+            r#"
+            (function() {{
+                const elem = document.querySelector('[__elementId="{}"]');
+                if (elem) {{
+                    elem.scrollBy({{ top: {}, behavior: 'smooth' }});
+                }} else {{
+                    throw new Error('元素未找到');
+                }}
+            }})()
+            "#,
+            element_id,
+            scroll_amount
+        );
+        self.driver.execute(&script, vec![]).await?;
+        Ok(())
+    }
+
+    /// 鼠标管理
+    async fn click_coords(&mut self, x: i32, y: i32, button: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        match button {
+            "back" => {
+                self.go_back().await?;
+            }
+            "forward" => {
+                self.go_forward().await?;
+            }
+            "wheel" => {
+                let (start_x, start_y) = self.anim_utils.last_cursor_position;
+                self.anim_utils.gradual_cursor_animation(&self.driver, start_x, start_y, x as f64, y as f64, 10, 50)
+                    .await?;
+                self.driver.as_ref().execute(
+                    &format!("window.scrollBy({{x: {}, y: {}}});", x, y),
+                    vec![],
+                ).await?;
+                self.anim_utils.cleanup_animations(&self.driver).await?;
+            }
+            "left" | "right" => {
+                let (start_x, start_y) = self.anim_utils.last_cursor_position;
+                self.anim_utils.gradual_cursor_animation(&self.driver, start_x, start_y, x as f64, y as f64, 10, 50)
+                    .await?;
+
+                let action_chain = self.driver.as_ref().action_chain()
+                    .move_to(x.into(), y.into());
+
+                let action_chain = if button == "left" {
+                    action_chain.click()
+                } else {
+                    action_chain.context_click()
+                };
+
+                action_chain.perform().await?;
+                self.anim_utils.cleanup_animations(&self.driver).await?;
+            }
+            _ => {
+                let error_info = WebDriverErrorInfo::new(format!("不支持的按钮类型: {}", button));
+                return Err(WebDriverError::UnknownError(error_info).into());
+            }
+        }
+        Ok(())
+    }
+
+    async fn double_coords(&mut self, x: i32, y: i32) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let (start_x, start_y) = self.anim_utils.last_cursor_position;
+        self.anim_utils.gradual_cursor_animation(&self.driver, start_x, start_y, x as f64, y as f64, 10, 50)
+            .await?;
+        self.driver.as_ref().action_chain()
+            .move_to(x.into(), y.into())
+            .double_click()
+            .perform().await?;
+        self.anim_utils.cleanup_animations(&self.driver).await?;
+        Ok(())
+    }
+
+    async fn hover_coords(&mut self, x: i32, y: i32) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let (start_x, start_y) = self.anim_utils.last_cursor_position;
+        self.anim_utils.gradual_cursor_animation(&self.driver, start_x, start_y, x as f64, y as f64, 10, 50)
+            .await?;
+        self.driver.as_ref().action_chain()
+            .move_to(x.into(), y.into())
+            .perform().await?;
+        self.anim_utils.cleanup_animations(&self.driver).await?;
+        Ok(())
+    }
+
+    async fn drag_coords(&mut self, path: Vec<(i32, i32)>) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if path.is_empty() {
+            return Ok(());
+        }
+
+        let window_size = self.driver.get_window_rect().await?;
+        let mut adjusted_path = Vec::new();
+
+        for &(mut x, mut y) in &path {
+            if (x < 0) {x = 0};
+            if (y < 0) {y = 0};
+            if (i64::from(x) > window_size.width) {x = window_size.width as i32};
+            if (i64::from(y) > window_size.height) {y = window_size.height as i32};
+            adjusted_path.push((x, y));
+        }
+
+        let mut action_chain = self.driver.action_chain();
+
+        // 第一步：移动到起点并按住
+        let (start_x, start_y) = adjusted_path[0];
+        action_chain = action_chain
+            .move_to(start_x.into(), start_y.into())
+            .click_and_hold();
+
+        // 第二步：对后续每个点，使用相对位移 move_by
+        let mut last_x = start_x;
+        let mut last_y = start_y;
+
+        for &(x, y) in &path[1..] {
+            self.anim_utils.gradual_cursor_animation(&self.driver, last_x as f64, last_y as f64, x as f64, y as f64, 10, 50).await?;
+            let dx = x - last_x;
+            let dy = y - last_y;
+            action_chain = action_chain.move_by_offset(dx.into(), dy.into());
+            last_x = x;
+            last_y = y;
+        }
+
+        // 第三步：释放鼠标
+        action_chain.release().perform().await?;
+
+        self.anim_utils.cleanup_animations(&self.driver).await?;
+        Ok(())
+    }
+
+    /// 键盘管理
+
+    async fn quit(self) -> Result<(), WebDriverError> {
+        <thirtyfour::WebDriver as Clone>::clone(&self.driver).quit().await?;
+        Ok(())
     }
 
 }
@@ -75,40 +217,26 @@ mod test {
 
     #[tokio::test]
     async fn test_chrome() -> Result<(), Box<dyn Error + Send + Sync>> {
-        let chrome = Chrome::new().await?;
+        let mut chrome = Chrome::new().await?;
         let tab1 = chrome.new_tab("https://www.bilibili.com").await?;
         sleep(Duration::from_secs(2)).await;
         let tab2 = chrome.new_tab("https://www.baidu.com").await?;
         sleep(Duration::from_secs(2)).await;
-        let tab3 = chrome.new_tab("https://www.google.com").await?;
-        sleep(Duration::from_secs(2)).await;
         chrome.switch_to_tab(&tab1).await?;
-        println!("B站标题: {}", chrome.driver.title().await?);
         sleep(Duration::from_secs(2)).await;
-        chrome.switch_to_tab(&tab2).await?;
-        println!("百度标题: {}", chrome.driver.title().await?);
+        chrome.page_down().await?;
         sleep(Duration::from_secs(2)).await;
-        chrome.switch_to_tab(&tab3).await?;
-        println!("谷歌标题: {}", chrome.driver.title().await?);
+        chrome.page_up().await?;
         sleep(Duration::from_secs(2)).await;
-        chrome.switch_to_tab(&tab3).await?;
-        chrome.close_tab().await?;
+        chrome.scroll_custom("down", 1000).await?;
         sleep(Duration::from_secs(2)).await;
-
-        chrome.switch_to_tab(&tab2).await?;
-        chrome.close_tab().await?;
-        sleep(Duration::from_secs(2)).await;
-
-        chrome.switch_to_tab(&tab1).await?;
-        chrome.close_tab().await?;
-        sleep(Duration::from_secs(2)).await;
-
         // 关闭浏览器
         chrome.quit().await?;
 
         Ok(())
     }
 }
+
 
 /* 
 impl Chrome {
@@ -136,44 +264,7 @@ impl Chrome {
         Ok(())
     }
 
-    pub fn go_back(&mut self) -> Result<()> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-        
-        tab.evaluate("window.history.back()", false)
-            .context("执行后退操作失败")?;
-            
-        tab.wait_until_navigated()
-            .context("等待后退页面加载完成失败")?;
-            
-        Ok(())
-    }
 
-    pub fn go_forward(&mut self) -> Result<()> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-
-        tab.evaluate("window.history.forward()", false)
-            .context("执行前进操作失败")?;
-            
-        tab.wait_until_navigated()
-            .context("等待前进页面加载完成失败")?;
-            
-        Ok(())
-    }
-
-    pub fn refresh(&mut self) -> Result<()> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-            
-        tab.reload(false, None)
-            .context("刷新页面失败")?;
-            
-        tab.wait_until_navigated()
-            .context("等待刷新页面加载完成失败")?;
-            
-        Ok(())
-    }
 
     /// 获取当前页面的 URL
     pub fn get_current_url(&self) -> Result<String> {
@@ -202,22 +293,6 @@ impl Chrome {
             .unwrap_or_else(|| "无标题".to_string());
             
         Ok(title)
-    }
-
-    /// 等待指定时间（用于测试）
-    pub async fn wait(&self, seconds: u64) {
-        info!("等待 {} 秒...", seconds);
-        sleep(Duration::from_secs(seconds)).await;
-    }
-
-    pub fn create_tab_id(&self) -> usize {
-        self.tabs.len() + 1
-    }
-
-    pub fn reindex_tabs(&mut self) {
-        for (index, (_, tab_info)) in self.tabs.iter_mut().enumerate() {
-            tab_info.index = index;
-        }
     }
 
     /// 创建新的标签页
@@ -303,34 +378,6 @@ impl Chrome {
         Ok(tabs_info)
     }
     
-    /// 切换到指定标签页
-    pub fn switch_tab(&mut self, tab_id: usize) -> Result<()> {
-        let tabs_info = self.tabs.get(&tab_id)
-            .ok_or_else(|| anyhow!("标签页 {} 不存在", tab_id))?
-            .clone();
-            
-        // 更新标签页的活跃状态
-        if let Some(current_id) = self.current_tab_id {
-            if let Some(current_tab_info) = self.tabs.get_mut(&current_id) {
-                current_tab_info.is_active = false;
-            }
-        }
-
-        // 设置新的活跃标签页
-        self.current_tab = Some(tabs_info.tab.clone());
-        self.current_tab_id = Some(tab_id);
-
-        if let Some(new_tab_info) = self.tabs.get_mut(&tab_id) {
-            new_tab_info.is_active = true;
-        }
-
-        tabs_info.tab
-            .activate()
-            .context("激活标签页失败")?;
-
-        info!("成功切换到标签页: {}", tab_id);
-        Ok(())
-    }
     
     /// 关闭指定标签页
     pub fn close_tab(&mut self, tab_id: usize) -> Result<()> {
@@ -479,67 +526,7 @@ impl Chrome {
     }
 
     /// 页面滚动
-    // 大范围
-    pub fn page_up(&self) -> Result<()> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
 
-        tab.wait_until_navigated().context("等待页面导航完成失败")?;
-
-        let viewport_height = self.viewport_height;
-        let scroll_amount = -(viewport_height as f64 * 0.5);
-
-        let js_script = format!(
-            "window.scrollBy({{ top: {}, behavior: 'smooth' }});",
-            scroll_amount
-        );
-        tab.evaluate(&js_script, true)
-            .context("执行页面上滚动操作失败")?;
-        std::thread::sleep(Duration::from_millis(500)); // 等待滚动动画完成
-
-        Ok(())
-    }
-
-    // 大范围
-    pub fn page_down(&self) -> Result<()> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-
-        tab.wait_until_navigated().context("等待页面导航完成失败")?;
-
-        let viewport_height = self.viewport_height;
-        let scroll_amount = viewport_height as f64 * 0.5;
-
-        let js_script = format!(
-            "window.scrollBy({{ top: {}, behavior: 'smooth' }});",
-            scroll_amount
-        );
-        tab.evaluate(&js_script, true)
-            .context("执行页面下滚动操作失败")?;
-        std::thread::sleep(Duration::from_millis(500)); // 等待滚动动画完成
-
-        Ok(())
-    }
-
-    // 可自定义范围
-    pub async fn scroll_custom(&mut self, dir: &str, pixels: Option<i32>) -> Result<()> {
-
-        let pixels = pixels.unwrap_or(400); // 默认滚动100像素
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-
-        tab.wait_until_navigated().context("等待页面导航完成失败")?;
-
-        let js_script = format!(
-            "window.scrollBy({{ top: {}, behavior: 'smooth' }});",
-            pixels * if dir == "up" { -1 } else { 1 }
-        );
-        tab.evaluate(&js_script, true)
-            .context("执行自定义滚动操作失败")?;
-        std::thread::sleep(Duration::from_millis(500)); // 等待滚动动画完成
-
-        Ok(())
-    }
 
     // 滚动指定的元素，例如内部的滚动条
     pub fn scroll_element(&mut self, element_id: &str, dir: &str, pixels: Option<i32>) -> Result<()> {
@@ -567,451 +554,6 @@ impl Chrome {
             .context("执行元素滚动操作失败")?;
         std::thread::sleep(Duration::from_millis(500)); // 等待滚动动画完成
 
-        Ok(())
-    }
-
-    // 鼠标操作
-    pub async fn click_coords(&mut self, x: i32, y: i32, button: &str) -> Result<Option<Arc<Tab>>> {
-        
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-
-        // 在点击位置添加一个临时的视觉指示器
-        let highlight_js = format!(
-            r#"
-            (function() {{
-                const indicator = document.createElement('div');
-                indicator.style.cssText = `
-                    position: fixed;
-                    z-index: 10000;
-                    pointer-events: none;
-                    width: 20px;
-                    height: 20px;
-                    background: rgba(255, 0, 0, 0.3);
-                    border: 2px solid red;
-                    border-radius: 50%;
-                    transform: translate(-50%, -50%);
-                    left: {x}px;
-                    top: {y}px;
-                `;
-                document.body.appendChild(indicator);
-                setTimeout(() => indicator.remove(), 300);
-            }})()
-            "#
-        );
-        tab.evaluate(&highlight_js, true)?;
-
-        tab.wait_until_navigated().context("等待页面导航完成失败")?;
-
-        // 特殊按钮
-        match button {
-            "back" => {
-                self.go_back()?;
-                Ok(None)
-            }
-            "forward" => {
-                self.go_forward()?;
-                Ok(None)
-            }
-            "wheel" => {
-                tab.evaluate(&format!("window.scrollBy({}, {});", x, y), true)?;
-                Ok(None)
-            }
-            "left" | "right" => {
-
-                // 创建鼠标事件序列
-                let button_num = if button == "left" { 0 } else { 2 };
-                let js = format!(
-                    r#"
-                    (function() {{
-                        const target = document.elementFromPoint({}, {});
-                        if (!target) throw new Error('No element at coordinates');
-                        ['mousedown', 'mouseup', 'click'].forEach(type => {{
-                            const event = new MouseEvent(type, {{
-                                view: window,
-                                bubbles: true,
-                                cancelable: true,
-                                clientX: {},
-                                clientY: {},
-                                button: {},
-                                buttons: 1
-                            }});
-                            target.dispatchEvent(event);
-                        }});
-                        {}  // 右键额外触发contextmenu事件
-                    }})();
-                    "#,
-                    x, y, x, y, button_num,
-                    if button == "right" {
-                        "target.dispatchEvent(new Event('contextmenu', { bubbles: true, cancelable: true }));"
-                    } else {
-                        ""
-                    }
-                );
-                tab.evaluate(&js, true)
-                    .map_err(|e| anyhow!("{}键点击失败: {}", button, e))?;
-                Ok(None)
-            }
-            _ => Err(anyhow!("不支持的按钮类型: {}", button)),
-        }
-
-    }
-
-    pub async fn double_coords(&mut self, x: i32, y: i32) -> Result<()> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-
-        // 添加双击视觉反馈
-        let highlight_js = format!(
-            r#"
-            (function() {{
-                // 创建两个同心圆的动画效果
-                const outer = document.createElement('div');
-                const inner = document.createElement('div');
-                
-                outer.style.cssText = `
-                    position: fixed;
-                    z-index: 10000;
-                    pointer-events: none;
-                    width: 30px;
-                    height: 30px;
-                    border: 2px solid rgba(255, 0, 0, 0.6);
-                    border-radius: 50%;
-                    transform: translate(-50%, -50%);
-                    left: {x}px;
-                    top: {y}px;
-                `;
-                
-                inner.style.cssText = `
-                    position: fixed;
-                    z-index: 10001;
-                    pointer-events: none;
-                    width: 16px;
-                    height: 16px;
-                    background: rgba(255, 0, 0, 0.3);
-                    border-radius: 50%;
-                    transform: translate(-50%, -50%);
-                    left: {x}px;
-                    top: {y}px;
-                `;
-                
-                document.body.appendChild(outer);
-                document.body.appendChild(inner);
-                
-                // 在两次点击的间隔显示
-                setTimeout(() => inner.remove(), 200);
-                setTimeout(() => outer.remove(), 400);
-            }})()
-            "#
-        );
-        tab.evaluate(&highlight_js, true)?;
-
-        tab.wait_until_navigated().context("等待页面导航完成失败")?;
-
-        // 执行双击事件序列
-        let js = format!(
-            r#"
-            (function() {{
-                const target = document.elementFromPoint({}, {});
-                if (!target) throw new Error('No element at coordinates');
-                
-                // 第一次点击
-                ['mousedown', 'mouseup', 'click'].forEach(type => {{
-                    const event = new MouseEvent(type, {{
-                        view: window,
-                        bubbles: true,
-                        cancelable: true,
-                        clientX: {},
-                        clientY: {},
-                        detail: 1,
-                        button: 0,
-                        buttons: 1
-                    }});
-                    target.dispatchEvent(event);
-                }});
-
-                // 第二次点击
-                ['mousedown', 'mouseup', 'click', 'dblclick'].forEach(type => {{
-                    const event = new MouseEvent(type, {{
-                        view: window,
-                        bubbles: true,
-                        cancelable: true,
-                        clientX: {},
-                        clientY: {},
-                        detail: 2,
-                        button: 0,
-                        buttons: 1
-                    }});
-                    target.dispatchEvent(event);
-                }});
-            }})();
-            "#,
-            x, y, x, y, x, y
-        );
-
-        tab.evaluate(&js, true)
-            .map_err(|e| anyhow!("双击操作失败: {}", e))?;
-
-        
-        Ok(())
-    }
-
-    pub async fn hover_coords(&mut self, x: i32, y: i32) -> Result<()> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-
-        // 在悬停位置添加指示器
-        let highlight_js = format!(
-            r#"
-            (function() {{
-                const indicator = document.createElement('div');
-                indicator.style.cssText = `
-                    position: fixed;
-                    z-index: 10000;
-                    pointer-events: none;
-                    width: 16px;
-                    height: 16px;
-                    border: 2px solid rgba(255, 165, 0, 0.8);
-                    border-radius: 50%;
-                    transform: translate(-50%, -50%);
-                    left: {x}px;
-                    top: {y}px;
-                `;
-                document.body.appendChild(indicator);
-                setTimeout(() => indicator.remove(), 1000);
-            }})()
-            "#
-        );
-        tab.evaluate(&highlight_js, true)?;
-
-        tab.wait_until_navigated().context("等待页面导航完成失败")?;
-
-        // 执行悬停事件序列
-        let js = format!(
-            r#"
-            (function() {{
-                const target = document.elementFromPoint({}, {});
-                if (!target) throw new Error('No element at coordinates');
-                
-                ['mouseover', 'mouseenter', 'mousemove'].forEach(type => {{
-                    const event = new MouseEvent(type, {{
-                        view: window,
-                        bubbles: true,
-                        cancelable: true,
-                        clientX: {},
-                        clientY: {},
-                        button: 0,
-                        buttons: 0
-                    }});
-                    target.dispatchEvent(event);
-                }});
-            }})();
-            "#,
-            x, y, x, y
-        );
-
-        tab.evaluate(&js, true)
-            .map_err(|e| anyhow!("悬停操作失败: {}", e))?;
-
-        Ok(())
-    }
-
-    pub async fn drag_coords(&mut self, path: Vec<(i32, i32)>) -> Result<()> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-
-        tab.wait_until_navigated().context("等待页面导航完成失败")?;
-        if path.is_empty() {
-            return Ok(());
-        }
-
-        // 显示拖拽路径
-        if let Some(&(start_x, start_y)) = path.first() {
-            let path_points = path.iter()
-                .map(|(x, y)| format!("{},{}", x, y))
-                .collect::<Vec<String>>()
-                .join(" ");
-
-            let js = format!(
-                r#"
-                (function() {{
-                    // 创建SVG元素来显示路径
-                    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-                    svg.style.cssText = 'position: fixed; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10000;';
-                    
-                    // 创建路径
-                    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-                    path.setAttribute('d', 'M {} L {}'.replace(/,/g, ' '));
-                    path.style.cssText = 'stroke: rgba(255,0,0,0.5); stroke-width: 2px; fill: none;';
-                    
-                    svg.appendChild(path);
-                    document.body.appendChild(svg);
-                    
-                    // 添加起点指示器
-                    const start = document.createElement('div');
-                    start.style.cssText = `
-                        position: fixed;
-                        z-index: 10001;
-                        width: 10px;
-                        height: 10px;
-                        background: red;
-                        border-radius: 50%;
-                        transform: translate(-50%, -50%);
-                        left: {start_x}px;
-                        top: {start_y}px;
-                    `;
-                    document.body.appendChild(start);
-                    
-                    setTimeout(() => {{
-                        svg.remove();
-                        start.remove();
-                    }}, 500);
-                }})()
-                "#,
-                format!("{},{}", start_x, start_y),
-                path_points
-            );
-            tab.evaluate(&js, true)?;
-        }
-
-        // 按下鼠标
-        tab.evaluate(&format!(
-            r#"
-            var event = new MouseEvent('mousedown', {{
-                bubbles: true,
-                cancelable: true,
-                clientX: {},
-                clientY: {},
-                button: 0
-            }});
-            document.elementFromPoint({}, {}).dispatchEvent(event);
-            "#,
-            path[0].0, path[0].1, path[0].0, path[0].1
-        ), true).map_err(|e| anyhow!("鼠标按下失败: {}", e))?;
-
-        // 沿路径移动
-        for &(x, y) in path.iter().skip(1) {
-
-            tab.evaluate(&format!(
-                r#"
-                var event = new MouseEvent('mousemove', {{
-                    bubbles: true,
-                    cancelable: true,
-                    clientX: {},
-                    clientY: {},
-                    buttons: 1
-                }});
-                document.elementFromPoint({}, {}).dispatchEvent(event);
-                "#,
-                x, y, x, y
-            ), true).map_err(|e| anyhow!("拖拽移动失败: {}", e))?;
-        }
-        
-        // 释放鼠标
-        if let Some(&(last_x, last_y)) = path.last() {
-            tab.evaluate(&format!(
-                r#"
-                var event = new MouseEvent('mouseup', {{
-                    bubbles: true,
-                    cancelable: true,
-                    clientX: {},
-                    clientY: {},
-                    button: 0
-                }});
-                document.elementFromPoint({}, {}).dispatchEvent(event);
-                "#,
-                last_x, last_y, last_x, last_y
-            ), true).map_err(|e| anyhow!("鼠标释放失败: {}", e))?;
-        }
-        Ok(())
-    }
-
-    pub async fn scroll_coords(&mut self, x: i32, y: i32, scroll_x: i32, scroll_y: i32) -> Result<()> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-
-        // 添加滚动视觉反馈
-        let scroll_indicator_js = format!(
-            r#"
-            (function() {{
-                // 创建滚动指示器
-                const indicator = document.createElement('div');
-                indicator.style.cssText = `
-                    position: fixed;
-                    z-index: 10000;
-                    pointer-events: none;
-                    width: 30px;
-                    height: 30px;
-                    left: {x}px;
-                    top: {y}px;
-                    transform: translate(-50%, -50%);
-                `;
-
-                // 根据滚动方向设置箭头样式
-                if (Math.abs({scroll_y}) > Math.abs({scroll_x})) {{
-                    // 垂直滚动
-                    const direction = {scroll_y} > 0 ? '↓' : '↑';
-                    indicator.innerHTML = `<div style="
-                        font-size: 24px;
-                        color: red;
-                        text-align: center;
-                        line-height: 30px;
-                    ">${{direction}}</div>`;
-                }} else {{
-                    // 水平滚动
-                    const direction = {scroll_x} > 0 ? '→' : '←';
-                    indicator.innerHTML = `<div style="
-                        font-size: 24px;
-                        color: red;
-                        text-align: center;
-                        line-height: 30px;
-                    ">${{direction}}</div>`;
-                }}
-
-                document.body.appendChild(indicator);
-
-                // 创建滚动轨迹
-                const track = document.createElement('div');
-                track.style.cssText = `
-                    position: fixed;
-                    z-index: 9999;
-                    pointer-events: none;
-                    background: rgba(255, 0, 0, 0.2);
-                    border: 1px solid rgba(255, 0, 0, 0.4);
-                    left: ${{Math.min({x}, {x} + {scroll_x})}}px;
-                    top: ${{Math.min({y}, {y} + {scroll_y})}}px;
-                    width: ${{Math.abs({scroll_x}) || 4}}px;
-                    height: ${{Math.abs({scroll_y}) || 4}}px;
-                `;
-                
-                document.body.appendChild(track);
-
-                // 移除指示器和轨迹
-                setTimeout(() => {{
-                    indicator.remove();
-                    track.remove();
-                }}, 500);
-            }})()
-            "#
-        );
-        tab.evaluate(&scroll_indicator_js, true)?;
-
-        tab.wait_until_navigated().context("等待页面导航完成失败")?;
-
-        // 移动到指定位置
-        tab.evaluate(&format!(
-            r#"
-            var event = new MouseEvent('mousemove', {{
-                bubbles: true,
-                cancelable: true,
-                clientX: {},
-                clientY: {}
-            }});
-            document.elementFromPoint({}, {}).dispatchEvent(event);
-            window.scrollBy({}, {});
-            "#,
-            x, y, x, y, scroll_x, scroll_y
-        ), true).map_err(|e| anyhow!("滚动失败: {}", e))?;
         Ok(())
     }
 
@@ -1353,20 +895,5 @@ impl Chrome {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-
-    #[test]
-    pub fn test_hover_id() {
-        let mut brower = Chrome::new(false).unwrap();
-        let tab = brower.current_tab.as_ref().unwrap();
-        tab.navigate_to("https://www.bilibili.com").unwrap();
-        tab.wait_until_navigated().unwrap();
-        let _ = brower.hover_id("primary-btn roll-btn");
-        std::thread::sleep(Duration::from_secs(5));
-    }
-}*/
+*/
 
