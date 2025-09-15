@@ -6,6 +6,7 @@ use serde_json::Value;
 use thirtyfour::{DesiredCapabilities,WebDriver, WindowHandle};
 use thirtyfour::error:: {WebDriverError,WebDriverErrorInfo, WebDriverErrorValue, WebDriverResult};
 use crate::tools::utils::animation_utils::AnimationUtils;
+use crate::tools::utils::webpage_text_utils::WebpageTextUtils;
 use crate::tools::chrome::types::{InteractiveRegion, VisualViewport};
 use std::collections::HashMap;
 
@@ -385,6 +386,37 @@ impl Chrome {
         Ok(())
     }
 
+    async fn get_all_webpage_text(&self,n_lines: Option<usize>) -> Result<String, WebDriverError> {
+        
+        let text_util = WebpageTextUtils::new(self.driver.clone());
+        let page_text = text_util.get_all_webpage_text(n_lines).await;
+        println!("page_text:{}",page_text);
+        Ok(page_text)
+    }
+
+    async fn get_visible_text(&self) -> Result<String, WebDriverError> {
+        let init_script = include_str!("page_script.js");
+        self.driver
+            .execute(init_script, Vec::new())
+            .await?;
+
+        let result = self.driver
+            .execute("return WebSurfer.getVisibleText();", Vec::new())
+            .await?;
+        
+        let text = result.json().to_string();
+        println!("String:{}",text);
+        Ok(text)
+    }
+
+    // 网页内容转化为Markdown
+    async fn get_page_markdown(&self,max_tokens:usize) -> Result<String, WebDriverError> {
+        let markdown_utils = WebpageTextUtils::new(self.driver.clone());
+        let markdown = markdown_utils.get_page_markdown(max_tokens.try_into().unwrap()).await;
+        println!("Markdown:{:?}",markdown);
+        markdown
+    }
+
     async fn quit(self) -> Result<(), WebDriverError> {
         <thirtyfour::WebDriver as Clone>::clone(&self.driver).quit().await?;
         Ok(())
@@ -401,12 +433,12 @@ mod test {
     #[tokio::test]
     async fn test_chrome() -> WebDriverResult<()> {
         let chrome = Chrome::new().await?;
-        let tab = chrome.new_tab("https://www.taobao.com").await?;
+        let tab = chrome.new_tab("https://www.baidu.com").await?;
         chrome.switch_to_tab(&tab).await?;
         let cur_url = chrome.get_url().await?;
         println!("当前Url:{}",cur_url);
-        sleep(Duration::from_secs(10)).await;
-        chrome.get_page_metadata().await?;
+        sleep(Duration::from_secs(5)).await;
+        chrome.get_page_markdown(10000).await?;
         sleep(Duration::from_secs(10)).await;
         // 关闭浏览器
         chrome.quit().await?;
@@ -438,34 +470,6 @@ impl Chrome {
         Ok(())
     }
 
-    /// 获取当前页面的 URL
-    pub fn get_current_url(&self) -> Result<String> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-            
-        Ok(tab.get_url())
-    }
-
-    /// 获取当前页面的标题
-    pub fn get_page_title(&self) -> Result<String> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-            
-        let result = tab.evaluate("document.title", false)
-            .context("获取页面标题失败")?;
-            
-        let title = result.value
-            .and_then(|v| {
-                if let Some(s) = v.as_str() {
-                    Some(s.to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "无标题".to_string());
-            
-        Ok(title)
-    }
     /// 获取所有标签页的信息
     /* 
     返回一个包含所有标签页信息的列表，每个标签页信息包含：
@@ -629,34 +633,6 @@ impl Chrome {
     /// 键盘操作
 
     /// 获取页面的信息（非常重要的一系列方法）
-    // 获取整个页面的纯文本
-    async fn get_page_text(&self) -> Result<String> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-            
-        let utils = WebpageTextUtils::new();
-        let tab_arc = tab.clone();
-        let result = utils.get_all_webpage_text(&tab_arc, 50).await;
-        Ok(result)
-    }
-
-    // 获取当前视图的可见文本
-    pub async fn get_visible_text(&self, tab: &Arc<Tab>) -> Result<String> {
-        let utils = WebpageTextUtils::new();
-        let result = utils.get_visible_text(tab).await;
-        Ok(result)
-    }
-
-    // 转化为markdown
-    pub async fn convert_to_markdown(&self) -> Result<String> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-            
-        let utils = WebpageTextUtils::new();
-        let tab_arc = tab.clone();
-        let result = utils.get_page_markdown(&tab_arc, 50).await;
-        Ok(result)
-    }
 
     // 生成一个包含页面标题，URL，滚动位置，可见文本和元数据的综合描述，用以向AI代理汇报当前的状态
     pub async fn describe_page(&self, get_screenshot: bool) -> (String, Option<Vec<u8>>, String) {
