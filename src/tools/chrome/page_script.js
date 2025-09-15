@@ -1,4 +1,4 @@
-var WebSurfer = WebSurfer || (function () {
+window.WebSurfer = window.WebSurfer || (function () {
     /**
      * WebSurfer - A JavaScript module for analyzing web page content and interactive elements
      *
@@ -430,31 +430,102 @@ var WebSurfer = WebSurfer || (function () {
 
     let _getMetaTags = function () {
         let meta = document.querySelectorAll("meta");
-        let results = {};
+        let results = {
+            name: {},
+            property: {},
+            httpEquiv: {},
+            charset: null,
+            other: []
+        };
         for (let i = 0; i < meta.length; i++) {
-            let key = null;
-            if (meta[i].hasAttribute("name")) {
-                key = meta[i].getAttribute("name");
-            }
-            else if (meta[i].hasAttribute("property")) {
-                key = meta[i].getAttribute("property");
-            }
-            else {
+            const tag = meta[i];
+            
+            // 处理charset属性
+            if (tag.hasAttribute("charset")) {
+                results.charset = tag.getAttribute("charset");
                 continue;
             }
-            if (meta[i].hasAttribute("content")) {
-                results[key] = meta[i].getAttribute("content");
+            
+            // 处理name属性
+            if (tag.hasAttribute("name")) {
+                const name = tag.getAttribute("name").toLowerCase();
+                const content = tag.hasAttribute("content") ? tag.getAttribute("content") : "";
+                // 处理可能的重复name属性
+                if (results.name[name]) {
+                    if (Array.isArray(results.name[name])) {
+                        results.name[name].push(content);
+                    } else {
+                        results.name[name] = [results.name[name], content];
+                    }
+                } else {
+                    results.name[name] = content;
+                }
+                continue;
             }
+            // 处理property属性(常用于Open Graph等)
+            if (tag.hasAttribute("property")) {
+                const prop = tag.getAttribute("property").toLowerCase();
+                const content = tag.hasAttribute("content") ? tag.getAttribute("content") : "";
+                results.property[prop] = content;
+                continue;
+            }
+            
+            // 处理http-equiv属性
+            if (tag.hasAttribute("http-equiv")) {
+                const equiv = tag.getAttribute("http-equiv").toLowerCase();
+                const content = tag.hasAttribute("content") ? tag.getAttribute("content") : "";
+                results.httpEquiv[equiv] = content;
+                continue;
+            }
+            
+            // 收集其他类型的meta标签
+            const tagInfo = {};
+            Array.from(tag.attributes).forEach(attr => {
+                tagInfo[attr.name] = attr.value;
+            });
+            results.other.push(tagInfo);
         }
         return results;
     };
 
     let _getJsonLd = function () {
         let jsonld = [];
-        let scripts = document.querySelectorAll('script[type="application/ld+json"]');
-        for (let i = 0; i < scripts.length; i++) {
-            jsonld.push(scripts[i].innerHTML.trim());
-        }
+        let scripts = document.querySelectorAll('script');
+        scripts.forEach(script => {
+            try {
+                // 尝试检测JSON-LD内容，即使type属性不标准
+                const type = script.getAttribute('type')?.toLowerCase();
+                const isJsonLdType = type === 'application/ld+json' || 
+                                   type === 'application/json+ld' ||
+                                   type === 'ld+json';
+                
+                // 如果类型匹配或者内容看起来像JSON-LD
+                if (isJsonLdType || 
+                    (script.textContent && 
+                     script.textContent.trim().startsWith('{') && 
+                     script.textContent.trim().endsWith('}'))) {
+                    
+                    const content = script.textContent.trim();
+                    if (content) {
+                        // 尝试解析JSON
+                        const parsed = JSON.parse(content);
+                        jsonld.push({
+                            type: type || 'detected',
+                            content: parsed
+                        });
+                    }
+                }
+            } catch (e) {
+                // 处理解析错误，但仍然收集原始内容
+                if (script.textContent && script.textContent.trim()) {
+                    jsonld.push({
+                        type: script.getAttribute('type') || 'invalid',
+                        content: script.textContent.trim(),
+                        error: 'Invalid JSON: ' + e.message
+                    });
+                }
+            }
+        });
         return jsonld;
     };
 
@@ -479,53 +550,73 @@ var WebSurfer = WebSurfer || (function () {
             }
         }
 
-        function traverseItem(item, information) {
-            const children = item.children;
-
-            for (let i = 0; i < children.length; i++) {
-                const child = children[i];
-
-                if (child.hasAttribute('itemscope')) {
-                    if (child.hasAttribute('itemprop')) {
-                        const itemProp = child.getAttribute('itemprop');
-                        const itemType = child.getAttribute('itemtype');
-
-                        const childInfo = {
-                            itemType: itemType
-                        };
-
-                        traverseItem(child, childInfo);
-
-                        itemProp.split(' ').forEach(propName => {
-                            addValue(information, propName, childInfo);
-                        });
-                    }
-
-                } else if (child.hasAttribute('itemprop')) {
-                    const itemProp = child.getAttribute('itemprop');
-                    itemProp.split(' ').forEach(propName => {
-                        if (propName === 'url') {
-                            addValue(information, propName, child.href);
-                        } else {
-                            addValue(information, propName, sanitize(child.getAttribute("content") || child.content || child.textContent || child.src || ""));
-                        }
-                    });
-                    traverseItem(child, information);
-                } else {
-                    traverseItem(child, information);
+        function traverseNode(node, information, parentItem) {
+            // 处理元素节点
+            if (node.nodeType === Node.ELEMENT_NODE) {
+                const element = node;
+                
+                // 如果这是一个新的itemscope，创建新的信息对象
+                if (element.hasAttribute('itemscope') && !parentItem) {
+                    const itemInfo = {
+                        itemType: element.getAttribute('itemtype') || '',
+                        properties: {}
+                    };
+                    traverseNode(element, itemInfo.properties, itemInfo);
+                    return itemInfo;
                 }
+                
+                // 处理itemprop属性
+                if (element.hasAttribute('itemprop')) {
+                    const props = element.getAttribute('itemprop').split(/\s+/).filter(Boolean);
+                    
+                    // 获取元素的值
+                    let value = '';
+                    if (element.hasAttribute('content')) {
+                        value = element.getAttribute('content');
+                    } else if (element.tagName === 'META') {
+                        value = element.getAttribute('content') || '';
+                    } else if (element.tagName === 'A' && element.hasAttribute('href')) {
+                        value = element.href;
+                    } else if (element.tagName === 'IMG' && element.hasAttribute('src')) {
+                        value = element.src;
+                    } else if (element.tagName === 'DATA' && element.hasAttribute('value')) {
+                        value = element.getAttribute('value');
+                    } else {
+                        // 获取元素文本内容
+                        value = sanitize(element.textContent);
+                    }
+                    
+                    // 如果元素包含itemscope，将其作为嵌套对象
+                    if (element.hasAttribute('itemscope')) {
+                        const nestedItem = {
+                            itemType: element.getAttribute('itemtype') || '',
+                            properties: {}
+                        };
+                        traverseNode(element, nestedItem.properties, nestedItem);
+                        props.forEach(prop => addValue(information, prop, nestedItem));
+                    } else {
+                        props.forEach(prop => addValue(information, prop, value));
+                    }
+                }
+                
+                // 递归处理子节点
+                Array.from(element.children).forEach(child => {
+                    traverseNode(child, information, parentItem);
+                });
             }
         }
 
         const microdata = [];
 
-        document.querySelectorAll("[itemscope]").forEach(function (elem, i) {
-            const itemType = elem.getAttribute('itemtype');
-            const information = {
-                itemType: itemType
-            };
-            traverseItem(elem, information);
-            microdata.push(information);
+        document.querySelectorAll("[itemscope]:not([itemprop])").forEach(function (elem) {
+            try {
+                const itemInfo = traverseNode(elem, {}, null);
+                if (itemInfo && (itemInfo.itemType || Object.keys(itemInfo.properties).length > 0)) {
+                    microdata.push(itemInfo);
+                }
+            } catch (e) {
+                console.warn('Error parsing microdata:', e);
+            }
         });
 
         return microdata;
@@ -536,22 +627,26 @@ var WebSurfer = WebSurfer || (function () {
         let metaTags = _getMetaTags();
         let microdata = _getMicrodata();
         let results = {}
+
+        results.title = document.title;
+        results.url = window.location.href;
+        results.domain = window.location.hostname;
+
         if (jsonld.length > 0) {
-            try {
-                results["jsonld"] = JSON.parse(jsonld);
-            }
-            catch (e) {
-                results["jsonld"] = jsonld;
-            }
+            results["jsonld"] = jsonld;
         }
+        
         if (microdata.length > 0) {
             results["microdata"] = microdata;
         }
-        for (let key in metaTags) {
-            if (metaTags.hasOwnProperty(key)) {
-                results["meta_tags"] = metaTags;
-                break;
-            }
+        
+        // 只在有元标签数据时添加，避免空对象
+        if (Object.keys(metaTags.name).length > 0 || 
+            Object.keys(metaTags.property).length > 0 ||
+            Object.keys(metaTags.httpEquiv).length > 0 ||
+            metaTags.charset ||
+            metaTags.other.length > 0) {
+            results["meta_tags"] = metaTags;
         }
         return results;
     };

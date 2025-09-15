@@ -41,6 +41,7 @@ cd Magentic-mini
 
 # 配置环境变量
 echo "DASHSCOPE_API_KEY=sk-your-api-key-here" > .env
+启动chromedriver chromedriver --port=9515
 ```
 
 ### 3. 运行应用

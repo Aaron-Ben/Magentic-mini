@@ -1,8 +1,13 @@
-use std::error::Error;
 use std::sync::Arc;
+use std::path::Path;
+use serde_json;
+use tokio::fs;
+use serde_json::Value;
 use thirtyfour::{DesiredCapabilities,WebDriver, WindowHandle};
-use thirtyfour::error:: {WebDriverError,WebDriverErrorInfo};
+use thirtyfour::error:: {WebDriverError,WebDriverErrorInfo, WebDriverErrorValue, WebDriverResult};
 use crate::tools::utils::animation_utils::AnimationUtils;
+use crate::tools::chrome::types::{InteractiveRegion, VisualViewport};
+use std::collections::HashMap;
 
 /// Chrome 浏览器控制器
 pub struct Chrome {
@@ -20,57 +25,79 @@ impl Chrome {
         })
     }
 
-    /// 标签页的管理
-    async fn new_tab(&self, url: &str) -> Result<WindowHandle, Box<dyn Error + Send + Sync>> {
-        let url = url.trim();
-        self.driver.execute(&format!("window.open('{}', 'www.google.com');", url), vec![]).await?;
-        let handles = self.driver.windows().await?;
-        Ok(handles.last().ok_or("无法获取新标签页句柄")?.clone())
+    pub async fn get_url(&self) -> Result<String,WebDriverError> {
+        let url = self.driver.current_url().await?;
+        Ok(url.to_string())
     }
 
-    async fn switch_to_tab(&self, handle: &WindowHandle) -> Result<(), Box<dyn Error + Send + Sync>> {
+    pub async fn get_title(&self) -> Result<String,WebDriverError> {
+        self.driver.title().await.map_err(|e| e.into())
+    }
+
+    /// 标签页的管理
+    async fn new_tab(&self, url: &str) -> WebDriverResult<WindowHandle> {
+        let url = url.trim();
+        self.driver.execute(&format!("window.open('{}', 'www.google.com');", url), vec![]).await?;
+        
+        let handles = self.driver.windows().await?;
+        let handle = handles.last().ok_or_else(|| {
+            WebDriverError::UnknownError(WebDriverErrorInfo {
+                status: 500,
+                error: "no tab find".to_string(),
+                value: WebDriverErrorValue {
+                    message: "Failed to get new tab handle".to_string(),
+                    error: None,
+                    stacktrace: None,
+                    data: None,
+                },
+            })
+        })?;
+        Ok(handle.clone())
+    }
+
+    async fn switch_to_tab(&self, handle: &WindowHandle) -> WebDriverResult<()> {
         self.driver.switch_to_window(handle.clone()).await?;
         Ok(())
     }
 
-    async fn close_tab(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn close_tab(&self) -> WebDriverResult<()> {
         self.driver.close_window().await?;
         Ok(())
     }
 
-    async fn go_back(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn go_back(&self) -> WebDriverResult<()> {
         self.driver.back().await?;
         Ok(())
     }
 
-    async fn go_forward(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn go_forward(&self) -> WebDriverResult<()> {
         self.driver.forward().await?;
         Ok(())
     }
 
-    async fn refresh(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn refresh(&self) -> WebDriverResult<()> {
         self.driver.refresh().await?;
         Ok(())
     }
 
     /// 滚动管理
-    async fn page_up(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn page_up(&self) -> WebDriverResult<()> {
         self.driver.execute("window.scrollBy({ top: -window.innerHeight / 2, behavior: 'smooth' });", vec![]).await?;
         Ok(())
     }
 
-    async fn page_down(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn page_down(&self) -> WebDriverResult<()> {
         self.driver.execute("window.scrollBy({ top: window.innerHeight / 2, behavior: 'smooth' });", vec![]).await?;
         Ok(())
     }
 
-    async fn scroll_custom(&self, dir: &str, pixels: i32) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn scroll_custom(&self, dir: &str, pixels: i32) -> WebDriverResult<()> {
         let scroll_amount = if dir == "up" { -pixels } else { pixels };
         self.driver.execute(&format!("window.scrollBy({{ top: {}, behavior: 'smooth' }});", scroll_amount), vec![]).await?;
         Ok(())
     }
 
-    async fn scroll_element(&self, element_id: &str, dir: &str, pixels: i32) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn scroll_element(&self, element_id: &str, dir: &str, pixels: i32) -> WebDriverResult<()> {
         let scroll_amount = if dir == "up" { -pixels } else { pixels };
         let script = format!(
             r#"
@@ -91,7 +118,7 @@ impl Chrome {
     }
 
     /// 鼠标管理
-    async fn click_coords(&mut self, x: i32, y: i32, button: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn click_coords(&mut self, x: i32, y: i32, button: &str) -> WebDriverResult<()> {
         match button {
             "back" => {
                 self.go_back().await?;
@@ -134,7 +161,7 @@ impl Chrome {
         Ok(())
     }
 
-    async fn double_coords(&mut self, x: i32, y: i32) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn double_coords(&mut self, x: i32, y: i32) -> WebDriverResult<()> {
         let (start_x, start_y) = self.anim_utils.last_cursor_position;
         self.anim_utils.gradual_cursor_animation(&self.driver, start_x, start_y, x as f64, y as f64, 10, 50)
             .await?;
@@ -146,7 +173,7 @@ impl Chrome {
         Ok(())
     }
 
-    async fn hover_coords(&mut self, x: i32, y: i32) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn hover_coords(&mut self, x: i32, y: i32) -> WebDriverResult<()> {
         let (start_x, start_y) = self.anim_utils.last_cursor_position;
         self.anim_utils.gradual_cursor_animation(&self.driver, start_x, start_y, x as f64, y as f64, 10, 50)
             .await?;
@@ -157,7 +184,7 @@ impl Chrome {
         Ok(())
     }
 
-    async fn drag_coords(&mut self, path: Vec<(i32, i32)>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn drag_coords(&mut self, path: Vec<(i32, i32)>) -> WebDriverResult<()> {
         if path.is_empty() {
             return Ok(());
         }
@@ -166,10 +193,10 @@ impl Chrome {
         let mut adjusted_path = Vec::new();
 
         for &(mut x, mut y) in &path {
-            if (x < 0) {x = 0};
-            if (y < 0) {y = 0};
-            if (i64::from(x) > window_size.width) {x = window_size.width as i32};
-            if (i64::from(y) > window_size.height) {y = window_size.height as i32};
+            if x < 0 {x = 0};
+            if y < 0 {y = 0};
+            if i64::from(x) > window_size.width {x = window_size.width as i32};
+            if i64::from(y) > window_size.height {y = window_size.height as i32};
             adjusted_path.push((x, y));
         }
 
@@ -203,6 +230,161 @@ impl Chrome {
 
     /// 键盘管理
 
+
+
+    /// 页面信息获取
+    // 截图信息
+    async fn get_screenshot(&self, path: Option<&str>) -> WebDriverResult<Vec<u8>> {
+        let png_data = self.driver.screenshot_as_png().await?;
+        if let Some(path_str) = path {
+            let path = Path::new(path_str);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).await?;
+            }
+            fs::write(path, &png_data).await?
+        }
+        Ok(png_data)
+    }
+
+    // 扫描页面并返回所有可交互元素的位置，大小和类型信息，这些元素会被注入一个唯一的__elementId,以便后续操作
+    async fn get_interactive_rects(&self) -> Result<HashMap<String,InteractiveRegion>, WebDriverError> {
+
+        let init_script = include_str!("page_script.js");
+        self.driver
+            .execute(init_script, Vec::new())
+            .await?;
+
+        // 执行 WebSurfer.getInteractiveRects()
+        let json_value = self
+            .driver
+            .execute("return WebSurfer.getInteractiveRects();", Vec::new())
+            .await?;
+
+        let serde_value: serde_json::Value = json_value.json().clone();
+        
+        // 反序列化 JSON
+        let result: HashMap<String, InteractiveRegion> = serde_json::from_value(serde_value.clone())
+            .map_err(|e| {
+                eprintln!("Failed to deserialize interactive rects: {}", e);
+                eprintln!("Raw JSON: {}", serde_value);
+                WebDriverError::UnknownError(WebDriverErrorInfo {
+                    status: 500,
+                    error: "unknown error".to_string(),
+                    value: WebDriverErrorValue {
+                        message: format!("Failed to parse interactive rects: {}", e),
+                        error: None,
+                        stacktrace: None,
+                        data: None,
+                    },
+                })
+            })?;
+        Ok(result)
+    }
+
+    // 获取当前适口的尺寸，缩放比例和滚动位置
+    async fn get_visual_viewport(&self) -> Result<VisualViewport,WebDriverError> {
+
+        let init_script = include_str!("page_script.js");
+        self.driver
+            .execute(init_script, Vec::new())
+            .await?;
+
+        let result = self.driver
+            .execute("return WebSurfer.getVisualViewport();", Vec::new())
+            .await?;
+        
+        // Convert result to HashMap
+        let viewport_data: HashMap<String, Value> = result
+            .json()
+            .as_object()
+            .ok_or_else(||WebDriverError::ParseError("Failed to parse viewport data as object".to_string()))?
+            .clone()
+            .into_iter()
+            .map(|(k,v)|(k,v.clone()))
+            .collect();
+        
+        // Convert HashMap to VisualViewport
+        VisualViewport::visualviewport_from_dict(&viewport_data)
+            .map_err(|e| {
+                WebDriverError::UnknownError(WebDriverErrorInfo {
+                    status: 500,
+                    error: "HashMap to VisualViewport Error".to_string(),
+                    value: WebDriverErrorValue {
+                        message: format!("HashMap to VisualViewport:Failed to parse interactive rects: {}", e),
+                        error: None,
+                        stacktrace: None,
+                        data: None,
+                    },
+                })
+            }
+        )
+        
+    }
+    
+    // 提取页面的元数据，如<title>,<meta>
+    /* 在javascipt getPageMetadata 返回的字典格式
+    {
+        "jsonId":[...]      JSON-LD 结构和数据
+        "meta_tags":{...}   HTML meta 标签
+        "microdata":[...]   HTML5 微数据
+    }
+
+    JSON-LD
+    ["{\"@context\": \"https://schema.org\", \"@type\": \"WebPage\", ...}", ...]
+    HTML meta
+    {
+    "description": "页面描述",
+    "keywords": "关键词1,关键词2",
+    "og:title": "Open Graph标题",
+    "og:description": "Open Graph描述",
+    // ...
+    }
+    microdata - HTML5
+    [{
+    "itemType": "https://schema.org/Person",
+    "name": "张三",
+    "jobTitle": "工程师",
+    // ... 其他属性
+    }, ...]
+    getPageMetadata 返回的确切结构
+    {
+        "jsonld": [         // 可选：JSON-LD数据数组
+            '{"@type": "WebPage", "name": "标题"}',  // 字符串（原始JSON文本）
+            '{"@type": "Person", "name": "作者"}'     // 字符串（原始JSON文本）
+        ],
+        "meta_tags": {      // 可选：HTML meta标签对象
+            "title": "页面标题",
+            "description": "页面描述", 
+            "keywords": "关键词1,关键词2",
+            "og:title": "Open Graph标题"
+        },
+        "microdata": [      // 可选：HTML5微数据对象数组
+            {
+                "itemType": "https://schema.org/WebPage",
+                "name": "页面名",
+                "author": {
+                    "itemType": "https://schema.org/Person",
+                    "name": "作者名"
+                }
+            }
+        ]
+    }
+    最终的返回应该是metadata = {xxx}
+     */
+    async fn get_page_metadata(&self) -> Result<(),WebDriverError> {
+
+        let init_script = include_str!("page_script.js");
+        self.driver
+            .execute(init_script, Vec::new())
+            .await?;
+
+        // 获取元数据
+        self.driver
+            .execute("return WebSurfer.getPageMetadata();", Vec::new())
+            .await?;
+        Ok(())
+    }
+
     async fn quit(self) -> Result<(), WebDriverError> {
         <thirtyfour::WebDriver as Clone>::clone(&self.driver).quit().await?;
         Ok(())
@@ -213,26 +395,21 @@ impl Chrome {
 #[cfg(test)]
 mod test {
     use super::*;
+    use thirtyfour::error::WebDriverResult;
     use tokio::time::{sleep, Duration};
 
     #[tokio::test]
-    async fn test_chrome() -> Result<(), Box<dyn Error + Send + Sync>> {
-        let mut chrome = Chrome::new().await?;
-        let tab1 = chrome.new_tab("https://www.bilibili.com").await?;
-        sleep(Duration::from_secs(2)).await;
-        let tab2 = chrome.new_tab("https://www.baidu.com").await?;
-        sleep(Duration::from_secs(2)).await;
-        chrome.switch_to_tab(&tab1).await?;
-        sleep(Duration::from_secs(2)).await;
-        chrome.page_down().await?;
-        sleep(Duration::from_secs(2)).await;
-        chrome.page_up().await?;
-        sleep(Duration::from_secs(2)).await;
-        chrome.scroll_custom("down", 1000).await?;
-        sleep(Duration::from_secs(2)).await;
+    async fn test_chrome() -> WebDriverResult<()> {
+        let chrome = Chrome::new().await?;
+        let tab = chrome.new_tab("https://www.taobao.com").await?;
+        chrome.switch_to_tab(&tab).await?;
+        let cur_url = chrome.get_url().await?;
+        println!("当前Url:{}",cur_url);
+        sleep(Duration::from_secs(10)).await;
+        chrome.get_page_metadata().await?;
+        sleep(Duration::from_secs(10)).await;
         // 关闭浏览器
         chrome.quit().await?;
-
         Ok(())
     }
 }
@@ -240,9 +417,6 @@ mod test {
 
 /* 
 impl Chrome {
-
-
-
     /// 页面导航与管理
     // 导航到指定的URL，而且智能处理下载文件，将下载的文件保存到指定的文件夹，并显示确认的页面
     pub fn visit_page() -> Result<()> { 
@@ -263,8 +437,6 @@ impl Chrome {
         info!("成功导航到: {}", url);
         Ok(())
     }
-
-
 
     /// 获取当前页面的 URL
     pub fn get_current_url(&self) -> Result<String> {
@@ -294,47 +466,6 @@ impl Chrome {
             
         Ok(title)
     }
-
-    /// 创建新的标签页
-    pub fn new_tab(&mut self, url: &str) -> Result<TabInfo> {
-        let new_tab = self.browser.new_tab()
-            .context("创建新标签页失败")?;
-            
-        new_tab.wait_until_navigated()
-            .context("等待新标签页加载完成失败")?;
-
-        // 激活标签页，使其成为当前活动的标签页
-        let navigate_result = new_tab.navigate_to(url);
-        let url_result = match navigate_result {
-            Ok(_) => {
-                new_tab.wait_until_navigated().context("等待新标签页加载完成失败")?;
-                new_tab.get_url()
-            }
-            Err(_) => String::new(),
-        };
-
-        let title = new_tab.get_title().unwrap_or_default();
-        let index = self.tabs.len();
-        let tab_id = self.create_tab_id();
-        let tab_info = TabInfo::new(new_tab, index, title, url_result, true);
-
-        // 更新当前活跃标签页状态
-        if let Some(current_tab_id) = self.current_tab_id {
-            if let Some(current_tab_info) = self.tabs.get_mut(&current_tab_id) {
-                current_tab_info.is_active = false;
-            }
-        }
-
-        // 插入新标签页
-        self.tabs.insert(tab_id, tab_info.clone());
-        self.current_tab_id = Some(tab_id);
-        self.current_tab = Some(tab_info.tab.clone());
-
-        info!("创建新标签页: ID={}, URL={}", tab_id, url);
-
-        Ok(tab_info)
-    }
-
     /// 获取所有标签页的信息
     /* 
     返回一个包含所有标签页信息的列表，每个标签页信息包含：
@@ -376,36 +507,6 @@ impl Chrome {
         tabs_info.sort_by_key(|info| info.index);
         
         Ok(tabs_info)
-    }
-    
-    
-    /// 关闭指定标签页
-    pub fn close_tab(&mut self, tab_id: usize) -> Result<()> {
-        if self.tabs.len() <= 1 {
-            return Err(anyhow!("无法关闭最后一个标签页"));
-        }
-        
-        let tab_info = self.tabs.remove(&tab_id)
-            .ok_or_else(|| anyhow!("标签页 {} 不存在", tab_id))?;
-            
-        // 关闭标签页
-        if let Err(e) = tab_info.tab.close(false) {
-            warn!("关闭标签页时出现错误: {:?}", e);
-        }
-        
-        // 如果关闭的是当前活跃标签页，切换到第一个可用标签页
-        if let Some((new_tab_id, _)) = self.tabs.iter().next() {
-            let new_tab_id = *new_tab_id;
-            self.switch_tab(new_tab_id)?;
-        } else {
-            self.current_tab_id = None;
-            self.current_tab = None;
-        }
-
-        self.reindex_tabs();
-        
-        info!("标签页 {} 已关闭", tab_id);
-        Ok(())
     }
 
     /// 元素交互
@@ -525,230 +626,9 @@ impl Chrome {
         Ok(())
     }
 
-    /// 页面滚动
-
-
-    // 滚动指定的元素，例如内部的滚动条
-    pub fn scroll_element(&mut self, element_id: &str, dir: &str, pixels: Option<i32>) -> Result<()> {
-        let pixels = pixels.unwrap_or(100); // 默认滚动100像素
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-
-        tab.wait_until_navigated().context("等待页面导航完成失败")?;
-
-        let js_script = format!(
-            r#"
-            (function() {{
-                const elem = document.querySelector('[__elementId="{}"]');
-                if (elem) {{
-                    elem.scrollBy({{ top: {}, behavior: 'smooth' }});
-                }} else {{
-                    throw new Error('元素未找到');
-                }}
-            }})()
-            "#,
-            element_id,
-            pixels * if dir == "up" { -1 } else { 1 }
-        );
-        tab.evaluate(&js_script, true)
-            .context("执行元素滚动操作失败")?;
-        std::thread::sleep(Duration::from_millis(500)); // 等待滚动动画完成
-
-        Ok(())
-    }
-
-    // 键盘操作
-    pub async fn keypress(&self, keys: Vec<&str>) -> Result<()> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-
-        tab.wait_until_navigated()
-            .context("等待页面导航完成失败")?;
-            
-        let mapped_keys: Vec<&str> = keys
-            .into_iter()
-            .map(|key| {
-                CUA_KEY_TO_CHROMIUM_KEY
-                .get(key.to_lowercase().as_str())
-                .copied()
-                .unwrap_or(key)
-            })
-            .collect();
-
-        // 首先获取当前焦点元素
-        let js = format!(
-            r#"
-            (function() {{
-                // 如果已有焦点元素，使用它
-                const activeElement = document.activeElement;
-                if (activeElement && activeElement !== document.body) {{
-                    return activeElement;
-                }}
-                
-                // 否则尝试找到一个可输入的元素
-                const inputElement = document.querySelector('input[type="text"], input[type="search"], textarea, [contenteditable="true"]');
-                if (inputElement) {{
-                    inputElement.focus();
-                    return inputElement;
-                }}
-                
-                return document.body;
-            }})();
-            "#
-        );
-        
-        // 执行 JS 获取目标元素
-        tab.evaluate(&js, false)
-            .context("获取输入元素失败")?;
-            
-        for key in &mapped_keys {
-            // 对于每个键都模拟完整的键盘事件序列
-            let js = format!(
-                r#"
-                (function() {{
-                    const target = document.activeElement;
-                    const key = '{}';
-                    
-                    // keydown 事件
-                    const keydownEvent = new KeyboardEvent('keydown', {{
-                        key,
-                        code: key.length === 1 ? 'Key' + key.toUpperCase() : key,
-                        bubbles: true,
-                        cancelable: true,
-                    }});
-                    target.dispatchEvent(keydownEvent);
-                    
-                    // 如果是单个字符，触发 input 事件
-                    if (key.length === 1) {{
-                        if (target.value !== undefined) {{
-                            target.value += key;
-                            const inputEvent = new InputEvent('input', {{
-                                bubbles: true,
-                                cancelable: true,
-                                data: key,
-                                inputType: 'insertText',
-                            }});
-                            target.dispatchEvent(inputEvent);
-                        }}
-                    }}
-                    
-                    // keyup 事件
-                    const keyupEvent = new KeyboardEvent('keyup', {{
-                        key,
-                        code: key.length === 1 ? 'Key' + key.toUpperCase() : key,
-                        bubbles: true,
-                        cancelable: true,
-                    }});
-                    target.dispatchEvent(keyupEvent);
-                }})();
-                "#,
-                key
-            );
-            
-            tab.evaluate(&js, false)
-                .context("键盘事件触发失败")?;
-        }
-
-        Ok(())
-    }
+    /// 键盘操作
 
     /// 获取页面的信息（非常重要的一系列方法）
-    // 获取当前页面的截图(仅仅字节信息即可)
-    async fn get_screenshot(&self) -> Result<Vec<u8>> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-            
-        let screenshot = tab.capture_screenshot(
-            headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png,
-            None,
-            None,
-            false
-        )?;
-        Ok(screenshot)
-    }
-
-    // 扫描页面并返回所有可交互元素的位置，大小和类型信息，这些元素会被注入一个唯一的__elementId,以便后续操作
-    async fn get_interactive_rects(&self) -> Result<InteractiveRegion> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-
-        // 注入
-        let script_path = std::path::Path::new(file!())
-            .parent()
-            .unwrap()
-            .join("page_script.js");
-        let page_script = std::fs::read_to_string(script_path)
-            .unwrap_or_else(|_| String::new());
-        
-        // 执行
-        if let Err(e) = tab.evaluate(&page_script, false) {
-            warn!("Failed to inject page script: {:?}", e);
-        }
-        
-        // 获取交互区域
-        let result = tab.evaluate("WebSurfer.getInteractiveRects();", false)
-            .context("Failed to get interactive rects")?;
-        
-        let interactive_rects = result.value
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default();
-        
-        Ok(interactive_rects)
-    }
-
-    // 获取当前适口的尺寸，缩放比例和滚动位置
-    async fn get_visual_viewport(&self) -> Result<VisualViewport> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-
-        let script_path = std::path::Path::new(file!())
-            .parent()
-            .unwrap()
-            .join("page_script.js");
-        let page_script = std::fs::read_to_string(script_path)
-            .unwrap_or_else(|_| String::new());
-
-        if let Err(e) = tab.evaluate(&page_script, false) {
-            warn!("Failed to inject page script: {:?}", e);
-        }
-
-        let result = tab.evaluate("WebSurfer.getVisualViewport();", false)
-            .context("Failed to get visual viewport")?;
-
-        let visual_viewport = result.value
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default();
-
-        Ok(visual_viewport)
-    }
-
-    // 获取页面的元数据（title, mata等标签）
-    async fn get_page_metadata(&self) -> Result<PageMetadata> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-        
-        let script_path = std::path::Path::new(file!())
-            .parent()
-            .unwrap()
-            .join("page_script.js");
-
-        let page_script = std::fs::read_to_string(script_path).unwrap_or_else(|_| String::new());
-
-        if let Err(e) = tab.evaluate(&page_script, false) {
-            warn!("Failed to inject page script: {:?}", e);
-        }
-
-        // 获取元数据
-        let result = tab.evaluate("WebSurfer.getPageMetadata();", false)
-            .context("Failed to get page metadata")?;
-
-        let metadata: PageMetadata = result.value
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default();
-
-        Ok(metadata)
-    }
-
     // 获取整个页面的纯文本
     async fn get_page_text(&self) -> Result<String> {
         let tab = self.current_tab.as_ref()
