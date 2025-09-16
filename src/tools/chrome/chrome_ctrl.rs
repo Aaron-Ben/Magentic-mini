@@ -1,12 +1,13 @@
 use std::sync::Arc;
 use std::path::Path;
+use std::time::Duration;
 use serde_json;
 use tokio::fs;
 use serde_json::Value;
 use thirtyfour::{DesiredCapabilities,WebDriver, WindowHandle};
 use thirtyfour::error:: {WebDriverError,WebDriverErrorInfo, WebDriverErrorValue, WebDriverResult};
 use crate::tools::utils::animation_utils::AnimationUtils;
-use crate::tools::utils::webpage_text_utils::WebpageTextUtils;
+use crate::tools::utils::webpage_text_utils::{WebpageTextUtils, WebpageTextError};
 use crate::tools::chrome::types::{InteractiveRegion, VisualViewport};
 use std::collections::HashMap;
 
@@ -33,6 +34,24 @@ impl Chrome {
 
     pub async fn get_title(&self) -> Result<String,WebDriverError> {
         self.driver.title().await.map_err(|e| e.into())
+    }
+
+    pub async fn wait_for_page_ready(&self) -> Result<(),WebDriverError> {
+        self.driver.execute(
+            r#"
+            return new Promise((resolve) => {
+                if (document.readyState === 'complete') {
+                    resolve();
+                } else {
+                    window.addEventListener('load', resolve);
+                }
+            });
+            "#,
+            vec![]
+        ).await?;
+
+        tokio::time::sleep(Duration::from_micros(1000)).await;
+        Ok(())
     }
 
     /// 标签页的管理
@@ -279,6 +298,7 @@ impl Chrome {
                     },
                 })
             })?;
+
         Ok(result)
     }
 
@@ -383,14 +403,18 @@ impl Chrome {
         self.driver
             .execute("return WebSurfer.getPageMetadata();", Vec::new())
             .await?;
+
         Ok(())
     }
 
     async fn get_all_webpage_text(&self,n_lines: Option<usize>) -> Result<String, WebDriverError> {
         
         let text_util = WebpageTextUtils::new(self.driver.clone());
-        let page_text = text_util.get_all_webpage_text(n_lines).await;
-        println!("page_text:{}",page_text);
+        let page_text = text_util
+            .get_all_webpage_text(n_lines)
+            .await
+            .map_err(Self::webpage_err_to_webdriver_err)?;
+
         Ok(page_text)
     }
 
@@ -405,21 +429,117 @@ impl Chrome {
             .await?;
         
         let text = result.json().to_string();
-        println!("String:{}",text);
+
         Ok(text)
     }
 
     // 网页内容转化为Markdown
     async fn get_page_markdown(&self,max_tokens:usize) -> Result<String, WebDriverError> {
+        
         let markdown_utils = WebpageTextUtils::new(self.driver.clone());
-        let markdown = markdown_utils.get_page_markdown(max_tokens.try_into().unwrap()).await;
-        println!("Markdown:{:?}",markdown);
-        markdown
+        let markdown = markdown_utils
+            .get_page_markdown(max_tokens.try_into().unwrap())
+            .await
+            .map_err(Self::webpage_err_to_webdriver_err)?;
+        println!("Markdown content:\n{}",markdown);
+        Ok(markdown)
     }
+    // 生成一个包含页面标题，URL，滚动位置，可见文本和元数据的综合描述，用以向AI代理汇报当前的状态
+    /*
+    pub async fn describe_page(&self, get_screenshot: bool) -> (String, Option<Vec<u8>>, String) {
+        let window_handle = self.driver.current_window_handle().await
+            .map_err(|e| WebDriverError::Custom(format!("Failed to get current window: {}", e)))?;
+    
+
+        // 截图
+        let screenshot = if get_screenshot {
+            Some(self.get_screenshot(None).await)
+        } else {
+            None
+        };
+        
+
+        // 获取页面标题和URL
+        let page_title = self.get_title();
+        let page_url = self.get_url();
+        
+        // 获取视口信息
+        let viewport = self.get_visual_viewport().await;
+        
+        // 获取可见文本
+        let visible_text = self.get_visible_text().await;
+        
+        // 获取页面元数据
+        let page_metadata = self.get_page_metadata().await.unwrap_or_default();
+        let metadata_json = serde_json::to_string_pretty(&page_metadata).unwrap_or_default();
+
+        // 使用简单的字符串长度作为哈希
+        let metadata_hash = format!("{:x}", metadata_json.len());
+
+        // 计算滚动位置百分比
+        let percent_visible = if viewport.unwrap().scroll_height > 0.0 {
+            (viewport.unwrap().height * 100.0 / viewport.unwrap().scroll_height) as i32
+        } else {
+            100
+        };
+        
+        let percent_scrolled = if viewport.unwrap().scroll_height > 0.0 {
+            (viewport.unwrap().page_top * 100.0 / viewport.unwrap().scroll_height) as i32
+        } else {
+            0
+        };
+        
+        // 确定位置描述
+        let position_text = if percent_scrolled < 1 {
+            String::from("at the top of the page")
+        } else if percent_scrolled + percent_visible >= 99 {
+            String::from("at the bottom of the page")
+        } else {
+            format!("{}% down from the top of the page", percent_scrolled)
+        };
+
+        // 构建描述消息
+        let message_content = format!(
+            "We are at the following webpage [{}]({}).\nThe viewport shows {}% of the webpage, and is positioned {}\nThe text in the viewport is:\n{}\nThe following metadata was extracted from the webpage:\n\n{}\n",
+            page_title, page_url, percent_visible, position_text, visible_text, metadata_json
+        );
+        
+        (message_content, screenshot, metadata_hash)
+    }*/
 
     async fn quit(self) -> Result<(), WebDriverError> {
         <thirtyfour::WebDriver as Clone>::clone(&self.driver).quit().await?;
         Ok(())
+    }
+
+    pub fn webpage_err_to_webdriver_err(webpage_err: WebpageTextError) -> WebDriverError {
+        match webpage_err {
+            WebpageTextError::WebDriver(inner_err) => inner_err,
+            WebpageTextError::Http(inner_err) => WebDriverError::UnknownError(
+                WebDriverErrorInfo::new(format!("HTTP请求错误（原WebpageTextError）: {}", inner_err))
+            ),
+            WebpageTextError::PdfExtract(inner_err) => WebDriverError::UnknownError(
+                WebDriverErrorInfo::new(format!("PDF提取错误（原WebpageTextError）: {}", inner_err))
+            ),
+            WebpageTextError::Io(inner_err) => WebDriverError::UnknownError(
+                WebDriverErrorInfo::new(format!("IO操作错误（原WebpageTextError）: {}", inner_err))
+            ),
+            WebpageTextError::Tiktoken(inner_err) => WebDriverError::UnknownError(
+                WebDriverErrorInfo::new(format!("Tokenizer错误（原WebpageTextError）: {}", inner_err))   
+            ),
+            WebpageTextError::SerdeJson(inner_err) => WebDriverError::UnknownError(
+                WebDriverErrorInfo::new(format!("JSON解析错误（原WebpageTextError）: {}", inner_err))
+            ),
+            WebpageTextError::ExtractText(inner_err) => WebDriverError::UnknownError(
+                WebDriverErrorInfo::new(format!("文本提取错误（原WebpageTextError）: {}", inner_err))
+            ),
+            WebpageTextError::Custom(inner_msg) => WebDriverError::UnknownError(
+                WebDriverErrorInfo::new(format!("业务逻辑错误（原WebpageTextError）: {}", inner_msg))
+            ),
+            WebpageTextError::Html(inner_err) => WebDriverError::UnknownError(
+                WebDriverErrorInfo::new(format!("HTML提取错误（原HtmlError）: {}", inner_err))
+            ),
+        }
     }
 
 }
@@ -433,13 +553,13 @@ mod test {
     #[tokio::test]
     async fn test_chrome() -> WebDriverResult<()> {
         let chrome = Chrome::new().await?;
-        let tab = chrome.new_tab("https://www.baidu.com").await?;
+        let tab = chrome.new_tab("https://www.google.com").await?;
         chrome.switch_to_tab(&tab).await?;
         let cur_url = chrome.get_url().await?;
         println!("当前Url:{}",cur_url);
+        sleep(Duration::from_secs(3)).await;
+        chrome.get_page_markdown(3000).await?;
         sleep(Duration::from_secs(5)).await;
-        chrome.get_page_markdown(10000).await?;
-        sleep(Duration::from_secs(10)).await;
         // 关闭浏览器
         chrome.quit().await?;
         Ok(())
@@ -631,74 +751,6 @@ impl Chrome {
     }
 
     /// 键盘操作
-
-    /// 获取页面的信息（非常重要的一系列方法）
-
-    // 生成一个包含页面标题，URL，滚动位置，可见文本和元数据的综合描述，用以向AI代理汇报当前的状态
-    pub async fn describe_page(&self, get_screenshot: bool) -> (String, Option<Vec<u8>>, String) {
-        let tab = if let Some(tab) = self.current_tab.as_ref() {
-            let _ = tab.wait_until_navigated();
-            tab
-        } else {
-            return (String::from("No active tab"), None, String::from(""));
-        };
-
-        // 截图
-        let screenshot = if get_screenshot {
-            tab.capture_screenshot(CaptureScreenshotFormatOption::Png, None, None, false)
-                .ok()
-        } else {
-            None
-        };
-        
-
-        // 获取页面标题和URL
-        let page_title = self.get_page_title().unwrap_or_default();
-        let page_url = self.get_current_url().unwrap_or_default();
-        
-        // 获取视口信息
-        let viewport = self.get_visual_viewport().await.unwrap_or_default();
-        
-        // 获取可见文本
-        let visible_text = self.get_visible_text(tab).await.unwrap_or_default();
-        
-        // 获取页面元数据
-        let page_metadata = self.get_page_metadata().await.unwrap_or_default();
-        let metadata_json = serde_json::to_string_pretty(&page_metadata).unwrap_or_default();
-
-        // 使用简单的字符串长度作为哈希
-        let metadata_hash = format!("{:x}", metadata_json.len());
-
-        // 计算滚动位置百分比
-        let percent_visible = if viewport.scroll_height > 0.0 {
-            (viewport.height * 100.0 / viewport.scroll_height) as i32
-        } else {
-            100
-        };
-        
-        let percent_scrolled = if viewport.scroll_height > 0.0 {
-            (viewport.page_top * 100.0 / viewport.scroll_height) as i32
-        } else {
-            0
-        };
-        
-        // 确定位置描述
-        let position_text = if percent_scrolled < 1 {
-            String::from("at the top of the page")
-        } else if percent_scrolled + percent_visible >= 99 {
-            String::from("at the bottom of the page")
-        } else {
-            format!("{}% down from the top of the page", percent_scrolled)
-        };
-
-        // 构建描述消息
-        let message_content = format!(
-            "We are at the following webpage [{}]({}).\nThe viewport shows {}% of the webpage, and is positioned {}\nThe text in the viewport is:\n{}\nThe following metadata was extracted from the webpage:\n\n{}\n",
-            page_title, page_url, percent_visible, position_text, visible_text, metadata_json
-        );
-        
-        (message_content, screenshot, metadata_hash)
-    }
  
     async fn set_mark(&self) -> Result<()> {
         let tab = self.current_tab.as_ref()

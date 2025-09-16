@@ -25,12 +25,13 @@ log = "0.4"
 lazy_static = "1.4"
 rustyline = "13.0"
 
-html2md = "0.2"
-tiktoken-rs = "0.5"
-tempfile = "3.0"
+html2md = "0.2.1"
+tiktoken-rs = "0.5.9"
+tempfile = "3.8"
 url = "2.4"
 tldextract = "0.6"
 urlencoding = "2.1"
+regex = "1"
 
 # PDF 处理相关依赖
 pdf-extract = "0.7"
