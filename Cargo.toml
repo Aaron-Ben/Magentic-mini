@@ -25,6 +25,8 @@ log = "0.4"
 lazy_static = "1.4"
 rustyline = "13.0"
 
+tokio-util = "0.7.15"
+
 html2md = "0.2.1"
 tiktoken-rs = "0.5.9"
 tempfile = "3.8"

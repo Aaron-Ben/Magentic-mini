@@ -1,4 +1,4 @@
-use crate::agents::{Orchestrator, WebSurfer};
+use crate::agents::{Orchestrator};
 use crate::llm::LlmClient;
 use crate::agents::plan_agent::types::{Plan, PlanStep};
 use anyhow::Result;
@@ -8,7 +8,7 @@ use rustyline::DefaultEditor;
 
 pub struct CliInterface {
     orchestrator: Orchestrator,
-    web_surfer: WebSurfer,
+    // web_surfer: WebSurfer,
     editor: DefaultEditor,
     current_plan: Option<Plan>,
     current_user_input: Option<String>,
@@ -18,12 +18,12 @@ impl CliInterface {
     pub fn new() -> Result<Self> {
         let llm_client = LlmClient::new()?;
         let orchestrator = Orchestrator::new(llm_client);
-        let web_surfer = WebSurfer::new();
+        // let web_surfer = WebSurfer::new();
         let editor = DefaultEditor::new()?;
 
         Ok(Self { 
             orchestrator, 
-            web_surfer,
+            // web_surfer,
             editor,
             current_plan: None,
             current_user_input: None,
