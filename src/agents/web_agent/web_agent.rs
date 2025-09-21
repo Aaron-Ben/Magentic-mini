@@ -39,7 +39,7 @@ impl WebAgent {
     pub async fn get_llm_response(
         self,
         cancellation_token: Option<CancellationToken>
-    ) -> Result<LLMResponse<T>> {
+    ) -> Result<LLMResponse> {
 
         // 检查页面存活，可交互，如果失败创建空的页面，避免崩溃
 
@@ -135,7 +135,7 @@ impl WebAgent {
     
     pub async fn executor_tool(
         &self,
-        messages:Vec<FunctionCall<T>>,              // 提取工具的名称
+        messages:Vec<FunctionCall>,              // 提取工具的名称
         rect: HashMap<String,InteractiveRegion>,    // 主要传递给需要与页面元素交互的工具
         tools: Vec<ToolSchema>,                     // 工具列表
         element_id_mapping: HashMap<String,String>, // 为页面元素提供ID映射

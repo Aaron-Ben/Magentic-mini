@@ -1,13 +1,21 @@
 use serde::{Deserialize, Serialize};
-use crate::types::{Plan,MessageTypeItem};
+use tokio_util::sync::CancellationToken;
 
+#[derive(Debug, Clone)]
+pub struct MessageContext {
+    pub agent_id: i32,
+    pub topic_id: i32,
+    pub is_rpc: bool,
+    pub cancellation_token: CancellationToken,
+    pub message_id : i32,
+}
 
 // 维护群聊对话的状态
 /* OrchestratorState 存在的必要性：Orchestrator本身不足以管理复杂的多代理对话，
 Orchestrator仅仅是编排逻辑的执行者，需要一个专门的状态管理模块来管理群聊对话的状态
 （跟踪对话的进展），OrchestratorState可以进行保持上下文，知道当前进行的步骤，确保所
 有的代理访问最新的消息以及暂停和恢复机制*/
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OrchestratorState {
     pub task: String,                           // 当前任务的描述
     pub plan_str: String,                        

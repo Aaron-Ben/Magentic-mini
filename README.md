@@ -1,12 +1,11 @@
-# Mini Magentic-UI
+# Mini Magentic
 
 智能任务规划和执行系统 - 将自然语言描述转换为可执行的任务计划
 
 ## ✨ 功能特性
 
 - 🤖 **智能规划**: 使用阿里云通义千问 AI，将自然语言转换为结构化任务计划
-- 🎯 **双模式代理**: 支持 WebSurfer（网络浏览）智能代理
-- 🖥️ **单界面支持**: 提供 CLI 命令行界面
+- 🎯 **模式代理**: 支持 WebSurfer（网络浏览）智能代理
 - 🚀 **一键执行**: 自动执行生成的任务计划
 - 📊 **实时监控**: 跟踪任务执行状态和进度
 
@@ -49,8 +48,6 @@ echo "DASHSCOPE_API_KEY=sk-your-api-key-here" > .env
 #### CLI 模式
 
 ```bash
-# 构建并运行 CLI
-cargo run cli
-# 或直接运行（默认为 CLI 模式）
+# 构建并运行
 cargo run
 ```
