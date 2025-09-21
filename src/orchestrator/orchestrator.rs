@@ -3,9 +3,10 @@ use serde_json::Value as JsonValue;
 use tokio_util::sync::CancellationToken;
 use crate::types::event::GroupChatStart;
 use crate::orchestrator::types::{OrchestratorState,MessageContext};
-use crate::tools::base::token_limited::{LLMMessage, TokenLimitedChatCompletionContext};
-use crate::types::StopMessage;
-use anyhow::{bail, Ok, Result};
+use crate::types::message::{ChatMessage, LLMMessage, StopMessage, UserMessage};
+use crate::types::plan::Plan;
+use crate::llm::client::{ChatCompletionClient};
+use anyhow::{bail, Result};
 use std::sync::{Arc, Mutex};
 use async_channel::Sender;
 
@@ -26,7 +27,7 @@ pub struct OrchestratorConfig {
     pub retrieve_relevant_plans: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Orchestrator<MessageType> {
     // 基础字段
     pub name: String,
@@ -40,10 +41,9 @@ pub struct Orchestrator<MessageType> {
     pub termination_condition: Option<Box<dyn TerminationConditionTrait>>,
 
     // 特有字段
-    message: MessageTypeItem,
+    message: Box<dyn ChatMessage>,
     output_message_queue: Arc<Mutex<Sender<MessageType>>>,
     model_client: Arc<dyn ChatCompletionClient>,
-    model_context: TokenLimitedChatCompletionContext,       // 对话的上下文管理器
     config: OrchestratorConfig,
     user_agent_topic: String,
     web_agent_topic: String,
@@ -66,7 +66,7 @@ impl <MessageType> Orchestrator<MessageType> {
         name: String,
         group_topic_type: String,
         output_topic_type: String,
-        message: MessageTypeItem,
+        message: Box<dyn ChatMessage>,
         participant_topic_types: Vec<String>,
         participant_descriptions: Vec<String>,
         participant_names: Vec<String>,
@@ -74,7 +74,7 @@ impl <MessageType> Orchestrator<MessageType> {
         model_client: Arc<dyn ChatCompletionClient>,
         config: OrchestratorConfig,
         termination_condition: Option<Box<dyn TerminationConditionTrait>>,
-        max_turns: Option<usize>,
+        max_turns: Option<i32>,
     ) -> Result<Self> {
 
         let user_agent_topic = "user_proxy".to_string();
@@ -101,10 +101,6 @@ impl <MessageType> Orchestrator<MessageType> {
             message: message,
             output_message_queue: output_message_queue,
             model_client: model_client,
-            model_context: TokenLimitedChatCompletionContext::new(
-                model_client.clone(),
-                config.model_context_token_limit,
-            ),
             config: config,
             user_agent_topic: user_agent_topic,
             web_agent_topic: web_agent_topic,
@@ -173,6 +169,8 @@ impl <MessageType> Orchestrator<MessageType> {
                 let early_stop_message = StopMessage {
                     content: "The group chat has already terminated.".to_string(),
                     source: self.name.clone(),
+                    models_usage: None,
+                    metadata: None,
                 };
                 self.signal_termination(early_stop_message).await?;
                 return Ok(());
@@ -192,6 +190,7 @@ impl <MessageType> Orchestrator<MessageType> {
                 topic_type: self.group_topic_type.clone(),
             },
             ctx.cancellation_token,
+            
         ).await?;
 
         // 将消息添加到历史记录
@@ -231,7 +230,7 @@ impl <MessageType> Orchestrator<MessageType> {
         if self.state.in_planning_mode {
             self.orchestrator_step_planning(cancellation_token)
         } else {
-            self.orchestrator_step_execution(cancellation_token)
+            self.orchestrator_step_execution(cancellation_token,false)
         }
     }
 
@@ -271,11 +270,11 @@ impl <MessageType> Orchestrator<MessageType> {
             }
 
             if !exception_message.is_empty() {
-                let feedback_msg = UserMessage::new(exception_message.clone(), self._name.clone());
-                self._model_context.add_message(feedback_msg).await;
+                let feedback_msg = UserMessage::new(exception_message.clone(), self.name.clone());
+                self.model_context.add_message(feedback_msg).await;
             }
 
-            let token_limited_messages = self._model_context.get_messages().await;
+            let token_limited_messages = self.model_context.get_messages().await;
 
             // 调用模型
 
@@ -289,5 +288,11 @@ impl <MessageType> Orchestrator<MessageType> {
         Ok(())
     }
 
+}
 
+// 为dyn TerminationConditionTrait手动实现Debug trait
+impl std::fmt::Debug for dyn TerminationConditionTrait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminationConditionTrait").finish()
+    }
 }

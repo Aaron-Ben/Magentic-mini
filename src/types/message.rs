@@ -63,6 +63,17 @@ impl SystemMessage {
     }
 }
 
+// 为dyn ChatMessage手动实现Debug trait
+impl std::fmt::Debug for dyn ChatMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatMessage")
+            .field("source", &self.source())
+            .field("content", &self.to_text())
+            .field("metadata", &self.metadata())
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserMessage {
     pub content: UserContent,

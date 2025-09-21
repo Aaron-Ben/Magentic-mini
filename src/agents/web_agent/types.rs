@@ -5,9 +5,9 @@ use serde_json::Value;
 use crate::tools::chrome::types::{InteractiveRegion};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-pub struct FunctionCall<T> {
+pub struct FunctionCall {
     pub id: String,             // 要调用函数的名称
-    pub arguments: T,      // 传递给函数的参数，可能包含多种类型，序列化为JSON字符串
+    pub arguments: String,      // 传递给函数的参数，可能包含多种类型，序列化为JSON字符串
     pub name: Option<String>,   // 函数调用的唯一标识符
 }
 
@@ -34,14 +34,14 @@ pub struct RequestUsage {
 }
 
 #[derive(Clone, Debug)]
-pub enum LLMOutput<T> {
+pub enum LLMOutput {
     Text(String),
-    FunctionCalls(Vec<FunctionCall<T>>)
+    FunctionCalls(Vec<FunctionCall>)
 }
 
 #[derive(Debug)]
-pub struct LLMResponse<T> {
-    pub output: LLMOutput<T>,
+pub struct LLMResponse {
+    pub output: LLMOutput,
     pub interactive: HashMap<String, InteractiveRegion>,
     pub tools: Vec<ToolSchema>,
     pub element_id: HashMap<String, String>,

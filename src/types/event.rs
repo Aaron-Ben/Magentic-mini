@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::types::{Message,StopMessage};
+use crate::types::message::{Message,StopMessage};
 use async_trait::async_trait;
 
 // === Event Trait - 用于控制和协调 ===

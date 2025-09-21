@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use crate::{tools::base::broad::{AgentId, TopicId}, types::{message::ChatMessage, plan::Plan}};
+
 #[derive(Debug, Clone)]
 pub struct MessageContext {
-    pub agent_id: i32,
-    pub topic_id: i32,
+    pub agent_id: AgentId,
+    pub topic_id: TopicId,
     pub is_rpc: bool,
     pub cancellation_token: CancellationToken,
     pub message_id : i32,
@@ -15,7 +17,7 @@ pub struct MessageContext {
 Orchestrator仅仅是编排逻辑的执行者，需要一个专门的状态管理模块来管理群聊对话的状态
 （跟踪对话的进展），OrchestratorState可以进行保持上下文，知道当前进行的步骤，确保所
 有的代理访问最新的消息以及暂停和恢复机制*/
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Default)]
 pub struct OrchestratorState {
     pub task: String,                           // 当前任务的描述
     pub plan_str: String,                        
@@ -26,7 +28,7 @@ pub struct OrchestratorState {
     pub in_planning_mode: bool,                 // 是否处于规划模式
     pub is_paused: bool,
     pub group_topic_type: String,               // 群聊的讨论主题
-    pub message_history: Vec<MessageTypeItem>,  // 完整的对话历史
+    pub message_history: Vec<Box<dyn ChatMessage>>,  // 完整的对话历史
     pub participant_topic_types: Vec<String>,   // 参与者主题类型列表
     pub n_replans: usize,                       // 重规划的次数
 }

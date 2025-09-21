@@ -10,14 +10,14 @@ use crate::agents::web_agent::types::LLMResponse;
 #[derive(Debug)]
 pub struct WebAgent {
     driver: Option<Arc<WebDriver>>,
-    model_usage: RequestUsage,
+    // model_usage: RequestUsage,
 }
 
 impl WebAgent {
     pub async fn new() -> Self {
         Self {
             driver:None,
-            model_usage: RequestUsage::Default,
+            // model_usage: RequestUsage::Default,
         }
     }
 
@@ -73,8 +73,6 @@ impl WebAgent {
     // web_agent的核心，接收用户或者，ent的消息，驱动浏览器进行一系列的操作，并将操作以流的形式（AsyncGenerator）逐步
     pub async fn on_messages_steam(
         self,
-        message: Vec<xxx>,
-        cancellation_token: Option<CancellationToken>,
     ) -> Result<()> {
 
         // 懒加载浏览器，确保浏览器已准备好
