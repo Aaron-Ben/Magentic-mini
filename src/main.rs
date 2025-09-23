@@ -1,8 +1,6 @@
 mod agents;
 mod llm;
-mod cli;
 
-use cli::CliInterface;
 use anyhow::Result;
 
 #[tokio::main]
@@ -16,8 +14,6 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
     
-    let mut cli_interface = CliInterface::new()?;
-    cli_interface.run().await?;
     
     Ok(())
 }

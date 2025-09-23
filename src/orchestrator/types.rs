@@ -1,17 +1,3 @@
-use serde::{Deserialize, Serialize};
-use tokio_util::sync::CancellationToken;
-
-use crate::{tools::base::broad::{AgentId, TopicId}, types::{message::ChatMessage, plan::Plan}};
-
-#[derive(Debug, Clone)]
-pub struct MessageContext {
-    pub agent_id: AgentId,
-    pub topic_id: TopicId,
-    pub is_rpc: bool,
-    pub cancellation_token: CancellationToken,
-    pub message_id : i32,
-}
-
 // 维护群聊对话的状态
 /* OrchestratorState 存在的必要性：Orchestrator本身不足以管理复杂的多代理对话，
 Orchestrator仅仅是编排逻辑的执行者，需要一个专门的状态管理模块来管理群聊对话的状态

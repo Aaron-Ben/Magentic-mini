@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::types::message::{Message,StopMessage};
+use crate::types::message::{Message, StopMessage};
 use async_trait::async_trait;
 
 // === Event Trait - 用于控制和协调 ===
@@ -41,13 +41,13 @@ impl std::fmt::Display for SerializableException {
 
 // === Group Chat 事件类型 ===
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct GroupChatStart {
-    pub messages: Option<Vec<Message>>,
+    pub messages: Vec<dyn BaseMessage>,
 }
 
 impl GroupChatStart {
-    pub fn new(messages: Option<Vec<Message>>) -> Self {
+    pub fn new(messages: Vec<Box<dyn BaseMessage>>) -> Self {
         Self { messages }
     }
 }
@@ -174,7 +174,7 @@ impl Event for GroupChatError {
 
 // === 统一的Event枚举类型 ===
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 pub enum ChatEvent {
     GroupChatStart(GroupChatStart),
@@ -233,7 +233,7 @@ impl Response {
 // === 完整的类型层次结构 ===
 
 /// 所有类型的大统一枚举
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub enum Communication {
     Message(Message),     // agent间的通信消息
     Event(ChatEvent),     // 控制和协调事件

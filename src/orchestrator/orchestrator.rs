@@ -1,31 +1,17 @@
-use serde::{Serialize, Deserialize};
+use chrono::Local;
 use serde_json::Value as JsonValue;
 use tokio_util::sync::CancellationToken;
+use crate::orchestrator::config::OrchestratorConfig;
 use crate::types::event::GroupChatStart;
 use crate::orchestrator::types::{OrchestratorState,MessageContext};
-use crate::types::message::{ChatMessage, LLMMessage, StopMessage, UserMessage};
-use crate::types::plan::Plan;
+use crate::types::message::{ChatMessage, LLMMessage, TextMessage, UserMessage};
 use crate::llm::client::{ChatCompletionClient};
-use anyhow::{bail, Result};
+use anyhow::{bail, Ok, Result};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use async_channel::Sender;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrchestratorConfig {
-    pub cooperative_planning: bool,
-    pub autonomous_execution: bool,
-    pub allow_follow_up_input: bool,
-    pub plan: Option<Plan>,
-    pub max_turns: Option<usize>,
-    pub allow_for_replans: bool,
-    pub max_json_retries: usize,
-    pub saved_facts: Option<String>,
-    pub allowed_websites: Option<Vec<String>>,
-    pub do_bing_search: bool,
-    pub final_answer_prompt: Option<String>,
-    pub model_context_token_limit: Option<usize>,
-    pub retrieve_relevant_plans: Option<String>,
-}
+
 
 #[derive(Debug)]
 pub struct Orchestrator<MessageType> {
@@ -162,40 +148,17 @@ impl <MessageType> Orchestrator<MessageType> {
         &mut self,
         message: GroupChatStart,
         ctx: MessageContext,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<()> {
         // 检查对话是否已经终止
-        if let Some(ref termination_condition) = self.termination_condition {
-            if termination_condition.terminated().await {
-                let early_stop_message = StopMessage {
-                    content: "The group chat has already terminated.".to_string(),
-                    source: self.name.clone(),
-                    models_usage: None,
-                    metadata: None,
-                };
-                self.signal_termination(early_stop_message).await?;
-                return Ok(());
-            }
-        }
 
         // 确保消息不为空
-        let messages = message.messages.as_ref()
-            .ok_or("Messages cannot be None")?;
 
         // 发送消息给所有代理
-        self.publish_message(
-            GroupChatStart {
-                messages: messages.clone(),
-            },
-            DefaultTopicId {
-                topic_type: self.group_topic_type.clone(),
-            },
-            ctx.cancellation_token,
-            
-        ).await?;
+        
 
         // 将消息添加到历史记录
-        for msg in messages {
-            self.state.message_history.push(msg.clone());
+        for msg in message.messages {
+            self.state.message_history.push(msg);
         }
 
         self.orchestrator_step(ctx.cancellation_token).await?;
@@ -212,33 +175,45 @@ impl <MessageType> Orchestrator<MessageType> {
 
     async fn prepare_final_answer(
         &self,
-        reason: String,
-        cancellation_token: CancellationToken,
-        final_answer: Option<String>,
-        force_stop: bool,
     ) -> Result<()> {
-
+        Ok(())
     }
 
-    async fn orchestrator_step(&mut self,cancellation_token: CancellationToken) -> Result<()> { 
+    async fn orchestrator_step(
+        &mut self,
+        ctx: MessageContext,
+    ) -> Result<()> { 
         
         if self.state.is_paused {
-            self.request_next_speaker(&self.user_agent_topic, cancellation_token);
+            self.request_next_speaker(&self.user_agent_topic, ctx).await?;
             return Ok(());
         }
 
         if self.state.in_planning_mode {
-            self.orchestrator_step_planning(cancellation_token)
+            self.orchestrator_step_planning(ctx.cancellation_token).await?;
         } else {
-            self.orchestrator_step_execution(cancellation_token,false)
+            self.orchestrator_step_execution(ctx.cancellation_token,false).await?;
         }
+
+        Ok(())
     }
 
     async fn orchestrator_step_planning(
         &mut self,
         cancellation_token: CancellationToken,
     ) -> Result<()> { 
-        // 
+
+        // Planning stage
+
+        // first planning
+
+        if self.state.task.is_empty() && self.state.plan_str.is_empty() {
+            self.state.task = "Task:".to_string();
+        } else {
+
+        }
+
+        Ok(())
     }
 
 
@@ -248,51 +223,153 @@ impl <MessageType> Orchestrator<MessageType> {
         first_step: bool,
     ) -> Result<()> { 
         if first_step {
-            
+            // TODO
         }
+
+        self.state.n_rounds += 1;
+        let context = self.thread_to_context(None);
+
+        
+        let progress_ledger_prompt = self.get_progress_ledger_prompt(
+            self.state.task.clone(),
+            self.state.plan_str.clone(),
+            self.state.current_step_idx,
+            self.team_description.clone(),
+            self.agent_execution_names.clone(),
+        );
+
+        context.push(LLMMessage::UserMessage(
+            UserMessage::new_text(progress_ledger_prompt, self.name.clone())
+        ));
+
+        let plan_response = self.get_json_response().await?;
+
+        if self.state.is_paused {
+            unimplemented!()
+        }
+
+        self.state.plan_str = String::new();
+
+        // self.state.message_history.push
+
+        
+
+        
+
+        Ok(())
     }
 
     async fn get_json_response(
         &mut self,
-        messages: Vec<LLMMessage>,
-        validate_json: ValidateJsonFn,
-        cancellation_token: CancellationToken,
     ) -> Result<()> {
-        let mut retries = 0;
-        let mut exception_message = String::new();
 
-        while retries < self.config.max_json_retries {
-            // 清空并重建上下文
-            self.model_context.clear().await;
+        Ok(())
+    }
 
-            for msg in &messages {
-                self.model_context.add_message(msg.clone()).await;
-            }
+    async fn request_next_speaker(
+        &mut self,
+        next_speaker: &str,
+        ctx: MessageContext,
+    ) -> Result<()> { 
+        Ok(())
+    }
 
-            if !exception_message.is_empty() {
-                let feedback_msg = UserMessage::new(exception_message.clone(), self.name.clone());
-                self.model_context.add_message(feedback_msg).await;
-            }
 
-            let token_limited_messages = self.model_context.get_messages().await;
+    // 对话历史转为LLMMessage
+    fn thread_to_context(&self, message:Option<String>) -> Vec<LLMMessage> {
 
-            // 调用模型
+        let chat_messages = message.unwrap_or(&self.state.message_history);
 
+        let mut context_messages = Vec::new();
+        let date_today = Local::now().format("%Y-%m-%d").to_string();
+
+
+        if self.state.in_planning_mode {
+            let planning_prompt = format!("This is a planning step. The task is: {}", self.state.task);
+            context_messages.push(LLMMessage::SystemMessage(
+                planning_prompt,
+            ));
+        } else {
+            let execution_prompt = format!("This is a execution step. The task is: {}", self.state.task);
+            context_messages.push(LLMMessage::SystemMessage(
+                execution_prompt,
+            ));
         }
 
+        // 步骤 3: 使用辅助函数转换对话历史
+        // let is_multimodal = self.model_client.model_info.vision;
+        // let converted_history = convert_agent_messages_to_llm_messages(
+        //     chat_messages,
+        //     &self.name,
+        //     is_multimodal,
+        // );
+
+        // // 将转换后的历史记录追加到上下文中
+        // context_messages.extend(converted_history);
+
+        // // 步骤 4: 返回最终构建完成的上下文
+        // context_messages
+
+        Vec::new()
+
+    }
+
+    async fn replan(&self,reason:String,cancellation_token: CancellationToken) -> Result<()> {
+        self.state.in_planning_mode = true;
+
+        let context = self.thread_to_context(None);
+
+        // Store completed steps
+
+
 
         Ok(())
     }
 
-    async fn request_next_speaker(&mut self, next_speaker: &str, cancellation_token: CancellationToken) -> Result<()> { 
+    async fn publish_group_chat_message(
+        self,
+        content: String,
+        cancellation_token: CancellationToken,
+        internal: bool,
+        metadata: Option<HashMap<String,String>>
+    ) -> Result<()> {
+        let message = TextMessage::new{
+            content : content,
+            source: self.name.clone(),
+            models_usage: None,
+            metadata: metadata.or_else(
+                {
+                    let mut map = std::collections::HashMap::new();
+                    map.insert("internal".to_string(), internal.to_string());
+                    map
+                }
+            ),
+        };
+
+        // publish_message
+
+        self.output_message_queue.send(message).await?;
+
+        // publish_message
+
         Ok(())
     }
 
+    fn get_progress_ledger_prompt(
+        &self,
+        task: String,
+        plan: String,
+        step_index: i32, 
+        team: String,
+        names: Vec<String>,
+    ) -> Result<String> {
+
+        let additional_instructions = String::new();
+
+        let step_type = "PlanStep".to_string();
+
+        Ok(String::new())
+    }
+
 }
 
-// 为dyn TerminationConditionTrait手动实现Debug trait
-impl std::fmt::Debug for dyn TerminationConditionTrait {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TerminationConditionTrait").finish()
-    }
-}

@@ -27,6 +27,7 @@ rustyline = "13.0"
 
 tokio-util = "0.7.15"
 async-channel = "1.9"
+dyn-clone = "1.0"
 
 html2md = "0.2.1"
 tiktoken-rs = "0.5.9"

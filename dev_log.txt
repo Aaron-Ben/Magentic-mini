@@ -1,6 +1,0 @@
-9.14
-在headless_chrome没有实现Page.setFileInputFiles相关方法的封装
-https://chromedevtools.github.io/devtools-protocol/tot/DOM/#method-setFileInputFiles
-
-setFileInputFiles 用户模拟用户在<input type="file">文件上传文件的操作
-使用WebDriver（thirtyfour） + ChromeDriver

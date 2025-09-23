@@ -141,7 +141,6 @@ impl LlmClient {
     pub async fn create(
         &self,
         messages: Vec<LLMMessage>,
-        tools: Option<Vec<ToolSchema>>,
         json_output: Option<bool>,
         extra_create_args: Option<HashMap<String, Value>>,
         cancellation_token: Option<CancellationToken>,
