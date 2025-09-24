@@ -20,7 +20,7 @@ pub struct MessageContext {
     pub message_id: String,                     
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CancellationToken {
     pub id: Uuid,
     pub cancelled: bool,
