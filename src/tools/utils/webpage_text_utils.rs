@@ -1,7 +1,6 @@
 use std::fmt::{Debug};
 use std::io::Write;
 use std::error::Error;
-use std::time::Duration;
 use anyhow::anyhow;
 use std::fmt;
 use pdf_extract::extract_text;
@@ -17,7 +16,8 @@ use reqwest::Client;
 use tempfile::NamedTempFile;
 use thirtyfour::prelude::*;
 use serde_json::Value;
-use html2md::parse_html;
+use tokio::time::Duration;
+use crate::tools::utils::markitdown_bridge::convert_html_to_markdown_with_markitdown;
 
 #[derive(Debug)]
 pub enum WebpageTextError {
@@ -196,57 +196,84 @@ impl WebpageTextUtils {
 
     // 网页处理工具：网页（PDF界面）转化为Markdown
     pub async fn get_page_markdown(&self, max_tokens: i32) -> Result<String,WebpageTextError> {
-        
         self.driver
             .set_implicit_wait_timeout(Duration::from_secs(10))
             .await?;
-        
+
         if self.is_pdf_page().await? {
             return self.extract_pdf_content().await;
         }
 
         let html = self.get_clean_html().await?;
 
-        let markdown = self.convert_html_markdown(&html);
+        let markdown = convert_html_to_markdown_with_markitdown(&html)
+        .await
+        .map_err(|e| WebpageTextError::Custom(format!("markitdown 转换失败: {}", e)))?;
 
-        let final_markdown = if max_tokens > 0 {
+        if max_tokens > 0 {
             self.limit_token(&markdown, max_tokens as usize)
         } else {
             Ok(markdown)
-        };
-
-        final_markdown
-
+        }
     }
 
     async fn get_clean_html(&self) -> Result<String,WebpageTextError> {
         let script = r#"
-            // 移除 script、style、注释和广告相关内容
-            document.querySelectorAll('script, style, noscript, iframe, [class*="ad"], [id*="ad"]').forEach(el => el.remove());
-            // 移除 HTML 注释
-            let walker = document.createTreeWalker(document.body, NodeFilter.SHOW_COMMENT);
-            while (walker.nextNode()) {
-                walker.currentNode.remove();
+            // 创建文档副本，避免修改原始DOM
+            const cleanDoc = document.cloneNode(true);
+            
+            // 只移除脚本和广告，保留样式
+            const elementsToRemove = [
+                'script', 'noscript', 'iframe',
+                '[class*="ad"]', '[id*="ad"]', '[class*="advertisement"]',
+                '[class*="banner"]', '[class*="popup"]', '[class*="modal"]',
+                '[class*="cookie"]', '[class*="consent"]'
+            ];
+            
+            elementsToRemove.forEach(selector => {
+                cleanDoc.querySelectorAll(selector).forEach(el => el.remove());
+            });
+            
+            // 移除空的div和span
+            cleanDoc.querySelectorAll('div, span').forEach(el => {
+                if (el.textContent.trim() === '' && el.children.length === 0) {
+                    el.remove();
+                }
+            });
+            
+            // 移除HTML注释
+            const walker = cleanDoc.createTreeWalker(
+                cleanDoc.body, 
+                NodeFilter.SHOW_COMMENT, 
+                null, 
+                false
+            );
+            const commentsToRemove = [];
+            let node;
+            while (node = walker.nextNode()) {
+                commentsToRemove.push(node);
             }
-            // 返回清理后的 HTML
-            return document.documentElement.outerHTML;
+            commentsToRemove.forEach(comment => comment.remove());
+            
+            // 返回清理后的HTML
+            return cleanDoc.documentElement.outerHTML;
         "#;
-
+    
         let result = self
             .driver
             .execute(script, vec![])
             .await
             .map_err(WebpageTextError::WebDriver)?;
-
+    
         let html = result
             .json()
             .as_str()
             .ok_or_else(|| WebpageTextError::Html("无法解析清理后的 HTML".into()))?
             .to_string();
-
+    
         Ok(html)
     }
-
+    
     // Tokenizen 枚举 --> CoreBPE 实例
     fn tokenizer_to_core_bpe(tokenizer: Tokenizer) -> Result<CoreBPE,anyhow::Error> {
         match tokenizer {
@@ -284,30 +311,6 @@ impl WebpageTextUtils {
             .map_err(|e| WebpageTextError::Tiktoken(anyhow!("Token解码失败：{}", e)))?;
 
         Ok(limited_content)
-    }
-
-    // 提取HTML转化为Markdown
-    fn convert_html_markdown(&self,html: &str) -> String {
-        
-        let mut markdown = parse_html(html);
-    
-        markdown = self.clean_markdown(&markdown);
-
-        markdown
-    }
-
-    fn clean_markdown(&self, markdown: &str) -> String {
-
-        let re = regex::Regex::new(r"\n\s*\n\s*\n+").unwrap();
-
-        let cleaned = re.replace_all(markdown, "\n\n").trim().to_string();
-        
-        // 过滤完全空的行，但保留代码块相关内容
-        cleaned
-            .lines()
-            .filter(|line| !line.trim().is_empty() || line.contains("```"))
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 
     // 从pdf 提取文本（高级实现，更好的错误处理）

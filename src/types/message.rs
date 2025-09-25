@@ -14,7 +14,7 @@ pub struct RequestUsage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageContext {
     pub sender: Option<String>,
-    pub topic_id: Option<String>,              // 消息的主题
+    pub topic_id: Option<String>,              // 消息的去处
     pub is_rpc: bool,
     pub cancellation_token: CancellationToken,  
     pub message_id: String,                     
@@ -295,35 +295,5 @@ impl Message for GroupChatEvent {
             GroupChatEvent::Termination(_) => "GroupChatTermination",
             GroupChatEvent::Error(_) => "GroupChatError",
         }
-    }
-}
-
-
-#[cfg(test)] 
-mod test {
-    use super::*;
-    #[tokio::test]
-    async fn test_message() {
-        let text_msg = BaseChatMessage::Text(TextMessage {
-            content: "你好，帮我搜索天气".to_string(),
-            source: "user".to_string(),
-            metadata: HashMap::new(),
-        });
-        
-        // 创建团队控制消息
-        let request_msg = GroupChatEvent::RequestPublish(GroupChatRequestPublish {});
-        
-        // 创建消息上下文
-        let context = MessageContext {
-            sender: Some(String::from("orchestrator")),
-            topic_id: Some(String::from("web_surfer")),
-            is_rpc: false,
-            cancellation_token: CancellationToken::new(),
-            message_id: Uuid::new_v4().to_string(),
-        };
-        
-        println!("Text message: {}", text_msg.to_text());
-        println!("Request message type: {}", request_msg.message_type());
-        println!("Context sender: {:?}", context.sender);
     }
 }

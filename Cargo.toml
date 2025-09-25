@@ -29,7 +29,6 @@ tokio-util = "0.7.15"
 async-channel = "1.9"
 dyn-clone = "1.0"
 
-html2md = "0.2.1"
 tiktoken-rs = "0.5.9"
 tempfile = "3.8"
 url = "2.4"
@@ -42,3 +41,11 @@ pdf-extract = "0.7"
 lopdf = "0.32"
 bytes = "1.0"
 image = "0.25.8"
+
+[dependencies.pyo3]
+version = "0.22.5"
+features = ["extension-module"]
+
+[lib]
+name = "markitdown"
+crate-type = ["cdylib"]

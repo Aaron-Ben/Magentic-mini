@@ -2,3 +2,5 @@ debug/
 /target/
 Cargo.lock
 .env
+.mypy_cache/
+.venv/

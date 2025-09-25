@@ -21,6 +21,9 @@ impl Chrome {
     pub async fn new() -> Result<Self, WebDriverError> {
         let caps = DesiredCapabilities::chrome();
         let driver = WebDriver::new("http://localhost:9515", caps).await?;
+
+        driver.get("https://www.google.com").await?;
+
         Ok(Self { 
             driver: Arc::new(driver),
             anim_utils: AnimationUtils::new(),
@@ -445,67 +448,6 @@ impl Chrome {
         Ok(markdown)
     }
     // 生成一个包含页面标题，URL，滚动位置，可见文本和元数据的综合描述，用以向AI代理汇报当前的状态
-    /*
-    pub async fn describe_page(&self, get_screenshot: bool) -> (String, Option<Vec<u8>>, String) {
-        let window_handle = self.driver.current_window_handle().await
-            .map_err(|e| WebDriverError::Custom(format!("Failed to get current window: {}", e)))?;
-    
-
-        // 截图
-        let screenshot = if get_screenshot {
-            Some(self.get_screenshot(None).await)
-        } else {
-            None
-        };
-        
-
-        // 获取页面标题和URL
-        let page_title = self.get_title();
-        let page_url = self.get_url();
-        
-        // 获取视口信息
-        let viewport = self.get_visual_viewport().await;
-        
-        // 获取可见文本
-        let visible_text = self.get_visible_text().await;
-        
-        // 获取页面元数据
-        let page_metadata = self.get_page_metadata().await.unwrap_or_default();
-        let metadata_json = serde_json::to_string_pretty(&page_metadata).unwrap_or_default();
-
-        // 使用简单的字符串长度作为哈希
-        let metadata_hash = format!("{:x}", metadata_json.len());
-
-        // 计算滚动位置百分比
-        let percent_visible = if viewport.unwrap().scroll_height > 0.0 {
-            (viewport.unwrap().height * 100.0 / viewport.unwrap().scroll_height) as i32
-        } else {
-            100
-        };
-        
-        let percent_scrolled = if viewport.unwrap().scroll_height > 0.0 {
-            (viewport.unwrap().page_top * 100.0 / viewport.unwrap().scroll_height) as i32
-        } else {
-            0
-        };
-        
-        // 确定位置描述
-        let position_text = if percent_scrolled < 1 {
-            String::from("at the top of the page")
-        } else if percent_scrolled + percent_visible >= 99 {
-            String::from("at the bottom of the page")
-        } else {
-            format!("{}% down from the top of the page", percent_scrolled)
-        };
-
-        // 构建描述消息
-        let message_content = format!(
-            "We are at the following webpage [{}]({}).\nThe viewport shows {}% of the webpage, and is positioned {}\nThe text in the viewport is:\n{}\nThe following metadata was extracted from the webpage:\n\n{}\n",
-            page_title, page_url, percent_visible, position_text, visible_text, metadata_json
-        );
-        
-        (message_content, screenshot, metadata_hash)
-    }*/
 
     async fn quit(self) -> Result<(), WebDriverError> {
         <thirtyfour::WebDriver as Clone>::clone(&self.driver).quit().await?;
@@ -553,7 +495,7 @@ mod test {
     #[tokio::test]
     async fn test_chrome() -> WebDriverResult<()> {
         let chrome = Chrome::new().await?;
-        let tab = chrome.new_tab("https://www.google.com").await?;
+        let tab = chrome.new_tab("https://www.taobao.com").await?;
         chrome.switch_to_tab(&tab).await?;
         let cur_url = chrome.get_url().await?;
         println!("当前Url:{}",cur_url);
@@ -572,21 +514,6 @@ impl Chrome {
     /// 页面导航与管理
     // 导航到指定的URL，而且智能处理下载文件，将下载的文件保存到指定的文件夹，并显示确认的页面
     pub fn visit_page() -> Result<()> { 
-        Ok(())
-    }
-
-    // 导航到指定 URL
-    pub fn navigate_to(&mut self, url: &str) -> Result<()> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-            
-        tab.navigate_to(url)
-            .with_context(|| format!("导航到 {} 失败", url))?;
-            
-        tab.wait_until_navigated()
-            .context("等待页面导航完成失败")?;
-            
-        info!("成功导航到: {}", url);
         Ok(())
     }
 
@@ -724,84 +651,4 @@ impl Chrome {
 
         Ok(())
     }
-
-    // 向输入框、文本区域或下拉框填充文本。支持先删除现有文本和在输入后按回车键
-    pub fn fill_text (&mut self, _element_id: &str, _text: &str) -> Result<()> {
-        Ok(())
-    }
-
-    // 选择下拉菜单选项
-    pub fn select_option(&mut self, _element_id: &str, _option_text: &str) -> Result<()> {
-        Ok(())
-    }
-
-    // 向输入框上传本地文件
-    pub fn upload_file(&mut self, element_id: &str, file_path: &str) -> Result<()> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-        tab.wait_until_navigated().context("等待页面导航完成失败")?;
-
-        let srcipt = format!(r#"
-        
-        "#, element_id, file_path);
-        self.page_script
-            .replace("{{ELEMENT_ID}}", element_id)
-            .replace("{{FILE_PATH}}", file_path);
-        Ok(())
-    }
-
-    /// 键盘操作
- 
-    async fn set_mark(&self) -> Result<()> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-            
-        let js_script = r#"
-            // 查询可交互元素
-            const interactiveElements = document.querySelectorAll('a, button, input, select, textarea, [contenteditable], [onclick], [onchange]');
-            
-            // 元素添加红色边框
-            interactiveElements.forEach(el => {
-                el.style.border = '2px solid red';
-                el.style.boxSizing = 'border-box';
-            });
-            
-            interactiveElements.length;
-        "#;
-        tab.evaluate(js_script, true)?;
-        Ok(())
-    }
-
-    async fn clear_mark(&self) -> Result<()> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
-            
-        let js_script = r#"
-            // 获取所有已添加的边框元素
-            const redBorderElements = document.querySelectorAll('[style*="border: 2px solid red"]');
-            
-            // 移除边框
-            redBorderElements.forEach(el => {
-                el.style.border = '';
-            });
-        "#;
-        tab.evaluate(js_script, true)?;
-        Ok(())
-    }
-
-    /// 关闭浏览器
-    pub fn close(mut self) -> Result<()> {
-        
-        // 关闭所有标签页
-        for (tab_id, tab_info) in self.tabs.drain() {
-            if let Err(e) = tab_info.tab.close(false) {
-                warn!("关闭标签页 {} 时出现错误: {:?}", tab_id, e);
-            }
-        }
-        
-        drop(self.browser);
-        Ok(())
-    }
-}
 */
-

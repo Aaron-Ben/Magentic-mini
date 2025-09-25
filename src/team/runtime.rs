@@ -26,14 +26,12 @@ pub struct Subscription {
 #[derive(Debug, Clone)]
 pub struct SubscriptionManager {
     subscriptions: Vec<Subscription>,
-    subscribed_recipients: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 impl SubscriptionManager {
     pub fn new() -> Self {
         Self {
             subscriptions: Vec::new(),
-            subscribed_recipients: Arc::new(Mutex::new(HashMap::new())),
         }
     } 
 
@@ -41,20 +39,12 @@ impl SubscriptionManager {
         self.subscriptions.push(subscription);
     }
 
-    pub async fn get_subscribed_recipients(&self, topic: &String) -> Vec<String> {
-        {
-            let cache = self.subscribed_recipients.lock().unwrap();
-            if let Some(recipients) = cache.get(topic) {
-                return recipients.clone();
-            }
-        }   // 释放锁
-        
-        let recipients = self.calculate_recipients(topic);
-        {
-            let mut cache = self.subscribed_recipients.lock().unwrap();
-            cache.insert(topic.clone(), recipients.clone());
-        }
-        recipients
+    pub async fn get_subscribed_recipients(&self, topic: &str) -> Vec<String> {
+        self.subscriptions
+            .iter()
+            .filter(|s|s.topic_type == topic)
+            .map(|s|s.agent_type.clone())
+            .collect()
     }
 
     fn calculate_recipients(&self, topic: &String) -> Vec<String> {
@@ -412,7 +402,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_rpc_with_no_subscriber() {
-        let (mut runtime, _, _) = AgentRuntime::new();
+        let (runtime, _, _) = AgentRuntime::new();
 
         // 只注册 agent1，但不订阅任何 topic
         let agent1 = WebAgent::new(runtime.clone(), "agent1".to_string());
