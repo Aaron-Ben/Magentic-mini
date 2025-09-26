@@ -5,16 +5,19 @@ use serde_json;
 use tokio::fs;
 use serde_json::Value;
 use thirtyfour::{DesiredCapabilities,WebDriver, WindowHandle};
+use thirtyfour::prelude::*;
 use thirtyfour::error:: {WebDriverError,WebDriverErrorInfo, WebDriverErrorValue, WebDriverResult};
 use crate::tools::utils::animation_utils::AnimationUtils;
 use crate::tools::utils::webpage_text_utils::{WebpageTextUtils, WebpageTextError};
-use crate::tools::chrome::types::{InteractiveRegion, VisualViewport};
+use crate::tools::chrome::types::{InteractiveRegion, VisualViewport, PageMetadata, TabInfo};
 use std::collections::HashMap;
 
 /// Chrome 浏览器控制器
 pub struct Chrome {
     driver: Arc<WebDriver>,
     anim_utils: AnimationUtils,
+    animate_actions: bool,
+    single_tab_mode: bool,
 }
 
 impl Chrome {
@@ -27,7 +30,15 @@ impl Chrome {
         Ok(Self { 
             driver: Arc::new(driver),
             anim_utils: AnimationUtils::new(),
+            animate_actions: true,
+            single_tab_mode: true,
         })
+    }
+
+    // 导航到指定的URL，而且智能处理下载文件，将下载的文件保存到指定的文件夹，并显示确认的页面
+    async fn _visit_page(&self) -> Result<(),WebDriverError> {
+        
+        unimplemented!();
     }
 
     pub async fn get_url(&self) -> Result<String,WebDriverError> {
@@ -76,6 +87,50 @@ impl Chrome {
             })
         })?;
         Ok(handle.clone())
+    }
+
+    // 获取标签页所有信息
+    /* 
+    返回一个包含所有标签页信息的列表，每个标签页信息包含：
+    index: 标签页的位置索引
+    title: 标签页的标题
+    url: 标签页的URL
+    is_active: 标签页是否当前可见
+    is_controlled: 标签页是否被当前控制
+     */
+    pub async fn get_tabs_information(&self) -> Result<Vec<TabInfo>, WebDriverError> {
+        let handles = self.driver.windows().await?;
+        let current_handle = self.driver.window().await?;
+        let mut tabs_info = Vec::new();
+        
+        for (index, handle) in handles.iter().enumerate() {
+            // 切换到当前标签页以获取信息
+            self.driver.switch_to_window(handle.clone()).await?;
+            
+            let title = self.driver.title().await.unwrap_or_default();
+            let url = self.driver.current_url().await?.to_string();
+            
+            // 检查是否是当前活跃的标签页
+            let is_active = handle == &current_handle;
+            
+            // 检查是否是当前控制的标签页（这里假设当前标签页就是被控制的）
+            let is_controlled = handle == &current_handle;
+            
+            let tab_info = TabInfo {
+                index,
+                title,
+                url,
+                is_active,
+                is_controlled,
+            };
+            
+            tabs_info.push(tab_info);
+        }
+        
+        // 切换回原来的标签页
+        self.driver.switch_to_window(current_handle).await?;
+        
+        Ok(tabs_info)
     }
 
     async fn switch_to_tab(&self, handle: &WindowHandle) -> WebDriverResult<()> {
@@ -251,9 +306,6 @@ impl Chrome {
         Ok(())
     }
 
-    /// 键盘管理
-
-
 
     /// 页面信息获取
     // 截图信息
@@ -302,6 +354,8 @@ impl Chrome {
                 })
             })?;
 
+
+        // println!("Interactive rects: {:?}", result);
         Ok(result)
     }
 
@@ -394,20 +448,56 @@ impl Chrome {
         ]
     }
     最终的返回应该是metadata = {xxx}
-     */
-    async fn get_page_metadata(&self) -> Result<(),WebDriverError> {
-
+     */ 
+    async fn get_page_metadata_data(&self) -> Result<PageMetadata, WebDriverError> {
         let init_script = include_str!("page_script.js");
         self.driver
             .execute(init_script, Vec::new())
             .await?;
 
         // 获取元数据
-        self.driver
+        let result = self.driver
             .execute("return WebSurfer.getPageMetadata();", Vec::new())
             .await?;
+        
+        // 获取当前页面信息
+        let title = self.get_title().await.ok().unwrap_or_default();
+        let url = self.get_url().await.ok().unwrap_or_default();
+        
+        // 解析元数据
+        let metadata_json: serde_json::Value = result.json().clone();
+        
+        // 尝试解析为PageMetadata
+        let mut page_metadata = PageMetadata {
+            domain: url.parse::<url::Url>().ok().and_then(|u| Some(u.domain()?.to_string())),
+            title: Some(title),
+            url: Some(url),
+            ..Default::default()
+        };
 
-        Ok(())
+        
+        // 解析JSON-LD数据
+        if let Some(jsonld) = metadata_json.get("jsonld") {
+            if let Ok(jsonld_vec) = serde_json::from_value(jsonld.clone()) {
+                page_metadata.json_ld = Some(jsonld_vec);
+            }
+        }
+        
+        // 解析meta标签
+        if let Some(meta_tags) = metadata_json.get("meta_tags") {
+            if let Ok(meta_tags_struct) = serde_json::from_value(meta_tags.clone()) {
+                page_metadata.meta_tags = Some(meta_tags_struct);
+            }
+        }
+        
+        // 解析微数据
+        if let Some(microdata) = metadata_json.get("microdata") {
+            if let Ok(microdata_vec) = serde_json::from_value(microdata.clone()) {
+                page_metadata.microdata = Some(microdata_vec);
+            }
+        }
+        
+        Ok(page_metadata)
     }
 
     async fn get_all_webpage_text(&self,n_lines: Option<usize>) -> Result<String, WebDriverError> {
@@ -447,7 +537,314 @@ impl Chrome {
         println!("Markdown content:\n{}",markdown);
         Ok(markdown)
     }
+    
     // 生成一个包含页面标题，URL，滚动位置，可见文本和元数据的综合描述，用以向AI代理汇报当前的状态
+    pub async fn describe_page(
+        &self,
+        get_screenshot: bool,
+    ) -> Result<(String, Option<Vec<u8>>, String), WebDriverError> {
+        // 确保页面已加载完成
+        self.wait_for_page_ready().await?;
+        
+        // 获取截图
+        let screenshot = if get_screenshot {
+            Some(self.get_screenshot(None).await?)
+        } else {
+            None
+        };
+        
+        // 获取页面标题和URL
+        let page_title = self.get_title().await?;
+        let page_url = self.get_url().await?;
+        
+        // 获取视口信息
+        let viewport = self.get_visual_viewport().await?;
+        
+        // 获取可见文本
+        let viewport_text = self.get_visible_text().await?;
+        
+        // 计算百分比
+        let percent_visible = if viewport.scroll_height > 0.0 {
+            ((viewport.height * 100.0) / viewport.scroll_height) as i32
+        } else {
+            100
+        };
+        
+        let percent_scrolled = if viewport.scroll_height > 0.0 {
+            ((viewport.page_top * 100.0) / viewport.scroll_height) as i32
+        } else {
+            0
+        };
+        
+        // 确定位置描述
+        let position_text = if percent_scrolled < 1 {
+            "at the top of the page".to_string()
+        } else if percent_scrolled + percent_visible >= 99 {
+            "at the bottom of the page".to_string()
+        } else {
+            format!("{}% down from the top of the page", percent_scrolled)
+        };
+        
+        // 获取页面元数据
+        let page_metadata = self.get_page_metadata_data().await?;
+        let metadata_json = serde_json::to_string_pretty(&page_metadata)
+            .unwrap_or_else(|_| "{}".to_string());
+        
+        // 生成元数据哈希
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        metadata_json.hash(&mut hasher);
+        let metadata_hash = format!("{:x}", hasher.finish());
+        
+        // 构建描述消息
+        let message_content = format!(
+            "We are at the following webpage [{}]({}).\nThe viewport shows {}% of the webpage, and is positioned {}\nThe text in the viewport is:\n {}\n\nThe following metadata was extracted from the webpage:\n\n{}\n",
+            page_title, page_url, percent_visible, position_text, viewport_text, metadata_json.trim()
+        );
+        
+        Ok((message_content, screenshot, metadata_hash))
+    }
+
+    // 点击具有特定 __elementId 属性的元素。它能处理右键点击、按住点击、在单标签模式下阻止新窗口打开，以及检测点击后触发的下载或新页面
+    pub async fn click_id(
+        &mut self,
+        identifier: &str,
+    ) -> Result<(), WebDriverError> {
+        self.driver.execute(
+            &format!("document.querySelector('[__elementId=\"{}\"]').click();", identifier),
+            vec![]
+        ).await?;
+
+
+        unimplemented!();
+    }
+
+    /// 将鼠标悬停在具有特定标识符的元素上
+    /// 支持动画效果和普通悬停
+    /* 其中element_id 代表页面上交互元素的唯一标识符，它是由 page_script.js 中扫描所有的交互元素
+    为交互元素分配唯一ID，然后 page_script.js 中的getInteractiveRects 返回所有交互元素及其
+    element_id, add_set_of_mark() 创建连续的数字ID映射到原始的elememt_id,工具参数使用ID
+    工具参数接收数字ID，通过element_id_mapping 转化为原始的element_id,hover_id 使用element_id
+    定位并操作元素
+    -JavaScript扫描 → page_script.js 识别交互元素并分配 __elementId
+    -元素信息收集 → playwright_controller.py 获取元素矩形和属性信息
+    -ID映射创建 → _set_of_mark.py 创建用户友好的数字ID映射
+    -工具调用 → _web_surfer.py 接收数字ID并转换为原始ID
+    -元素定位 → playwright_controller.py 使用 __elementId 定位元素
+    -动画执行 → animation_utils.py 执行光标动画和元素高亮
+    -鼠标悬停 → playwright_controller.py 执行实际的鼠标悬停操作
+    */
+    pub async fn hover_id(
+        &mut self,
+        identifier: &str,
+    ) -> Result<(), WebDriverError> {
+        // 确保页面已加载完成
+        self.wait_for_page_ready().await?;
+        
+        // 等待元素可见
+        let _element_selector = format!("[__elementId='{}']", identifier);
+        
+        // 滚动到元素可见
+        self.driver.execute(
+            &format!("document.querySelector('[__elementId=\"{}\"]').scrollIntoView({{ behavior: 'smooth', block: 'center' }});", identifier),
+            vec![]
+        ).await?;
+        
+        // 等待一下让滚动完成
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        
+        // 获取元素边界框
+        let rect = self.driver.execute(
+            &format!(
+                r#"
+                const el = document.querySelector('[__elementId="{}"]');
+                if (!el) throw new Error('Element not found');
+                const rect = el.getBoundingClientRect();
+                return {{ x: rect.left, y: rect.top, width: rect.width, height: rect.height }};
+                "#,
+                identifier
+            ),
+            vec![]
+        ).await?;
+        
+        let rect_data: serde_json::Value = rect.json().clone();
+        let x = rect_data["x"].as_f64().unwrap_or(0.0);
+        let y = rect_data["y"].as_f64().unwrap_or(0.0);
+        let width = rect_data["width"].as_f64().unwrap_or(0.0);
+        let height = rect_data["height"].as_f64().unwrap_or(0.0);
+        
+        let end_x = x + width / 2.0;
+        let end_y = y + height / 2.0;
+        
+        // 执行悬停操作
+        if self.animate_actions {
+            // 添加光标动画
+            self.anim_utils.add_cursor_box(&self.driver, identifier).await?;
+            
+            // 移动光标到元素中心
+            let (start_x, start_y) = self.anim_utils.last_cursor_position;
+            self.anim_utils.gradual_cursor_animation(
+                &self.driver,
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                10,
+                50
+            ).await?;
+            
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            
+            // 移动到元素中心
+            self.driver.action_chain()
+                .move_to(end_x as i64, end_y as i64)
+                .perform().await?;
+            
+            // 清理动画效果
+            self.anim_utils.remove_cursor_box(&self.driver, identifier).await?;
+        } else {
+            // 直接移动到元素中心
+            self.driver.action_chain()
+                .move_to(end_x as i64, end_y as i64)
+                .perform().await?;
+        }
+        
+        Ok(())
+    }
+
+    /// 向具有特定标识符的元素填充文本(键盘输入)
+    /// 适用于文本输入框、文本区域和下拉框
+    pub async fn fill_id(
+        &mut self,
+        identifier: &str,
+        value: &str,
+        press_enter: bool,
+        delete_existing_text: bool,
+    ) -> Result<(), WebDriverError> {
+        // 确保页面已加载完成
+        self.wait_for_page_ready().await?;
+        
+        // 等待元素可见
+        let _element_selector = format!("[__elementId='{}']", identifier);
+        
+        // 滚动到元素可见
+        self.driver.execute(
+            &format!("document.querySelector('[__elementId=\"{}\"]').scrollIntoView({{ behavior: 'smooth', block: 'center' }});", identifier),
+            vec![]
+        ).await?;
+        
+        // 获取元素边界框
+        let rect = self.driver.execute(
+            &format!(
+                r#"
+                const el = document.querySelector('[__elementId="{}"]');
+                if (!el) throw new Error('Element not found');
+                const rect = el.getBoundingClientRect();
+                return {{ x: rect.left, y: rect.top, width: rect.width, height: rect.height }};
+                "#,
+                identifier
+            ),
+            vec![]
+        ).await?;
+        
+        let rect_data: serde_json::Value = rect.json().clone();
+        let x = rect_data["x"].as_f64().unwrap_or(0.0);
+        let y = rect_data["y"].as_f64().unwrap_or(0.0);
+        let width = rect_data["width"].as_f64().unwrap_or(0.0);
+        let height = rect_data["height"].as_f64().unwrap_or(0.0);
+        
+        let end_x = x + width / 2.0;
+        let end_y = y + height / 2.0;
+        
+        // 单标签模式：移除target属性防止新标签页
+        if self.single_tab_mode {
+            self.driver.execute(
+                &format!(
+                    r#"
+                    const el = document.querySelector('[__elementId="{}"]');
+                    if (el) el.removeAttribute('target');
+                    // 移除所有 <a> 标签的 target 属性
+                    document.querySelectorAll('a[target=_blank]').forEach(a => a.removeAttribute('target'));
+                    // 移除所有 <form> 标签的 target 属性
+                    document.querySelectorAll('form[target=_blank]').forEach(frm => frm.removeAttribute('target'));
+                    "#,
+                    identifier
+                ),
+                vec![]
+            ).await?;
+        }
+        
+        // 执行填充操作
+        if self.animate_actions {
+            // 添加光标动画
+            self.anim_utils.add_cursor_box(&self.driver, identifier).await?;
+            
+            // 移动光标到元素中心
+            let (start_x, start_y) = self.anim_utils.last_cursor_position;
+            self.anim_utils.gradual_cursor_animation(
+                &self.driver,
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                10,
+                50
+            ).await?;
+            
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        
+        // 点击元素获得焦点
+        self.driver.action_chain()
+            .move_to(end_x as i64, end_y as i64)
+            .click()
+            .perform().await?;
+        
+        // 删除现有文本
+        if delete_existing_text {
+            self.driver.action_chain()
+                .key_down(Key::Control)
+                .send_keys("a")
+                .key_up(Key::Control)
+                .send_keys(Key::Backspace)
+                .perform().await?;
+        }
+        
+        // 输入文本
+        if self.animate_actions {
+            // 为短文本使用较慢的输入速度，长文本使用较快的速度
+            let delay_ms = if value.len() < 100 { 20 + (30.0 * 0.5) as u64 } else { 5 };
+            
+            // 逐字符输入以模拟打字效果
+            for ch in value.chars() {
+                self.driver.action_chain()
+                    .send_keys(&ch.to_string())
+                    .perform().await?;
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        } else {
+            // 直接输入文本
+            self.driver.action_chain()
+                .send_keys(value)
+                .perform().await?;
+        }
+        
+        // 按回车键
+        if press_enter {
+            tokio::time::sleep(Duration::from_millis(100)).await; // 等待建议出现
+            self.driver.action_chain()
+                .send_keys(Key::Enter)
+                .perform().await?;
+        }
+        
+        // 清理动画效果
+        if self.animate_actions {
+            self.anim_utils.remove_cursor_box(&self.driver, identifier).await?;
+        }
+        
+        Ok(())
+    }
 
     async fn quit(self) -> Result<(), WebDriverError> {
         <thirtyfour::WebDriver as Clone>::clone(&self.driver).quit().await?;
@@ -495,160 +892,70 @@ mod test {
     #[tokio::test]
     async fn test_chrome() -> WebDriverResult<()> {
         let chrome = Chrome::new().await?;
-        let tab = chrome.new_tab("https://www.taobao.com").await?;
-        chrome.switch_to_tab(&tab).await?;
+        let tab1 = chrome.new_tab("https://www.bilibili.com").await?;
+        chrome.switch_to_tab(&tab1).await?;
+        sleep(Duration::from_secs(2)).await;
         let cur_url = chrome.get_url().await?;
         println!("当前Url:{}",cur_url);
-        sleep(Duration::from_secs(3)).await;
-        chrome.get_page_markdown(3000).await?;
-        sleep(Duration::from_secs(5)).await;
+        chrome.get_interactive_rects().await?;
+        
+        sleep(Duration::from_secs(2)).await;
         // 关闭浏览器
         chrome.quit().await?;
         Ok(())
     }
-}
 
-
-/* 
-impl Chrome {
-    /// 页面导航与管理
-    // 导航到指定的URL，而且智能处理下载文件，将下载的文件保存到指定的文件夹，并显示确认的页面
-    pub fn visit_page() -> Result<()> { 
+    #[tokio::test]
+    async fn test_hover_id() -> WebDriverResult<()> {
+        let mut chrome = Chrome::new().await?;
+        let tab = chrome.new_tab("https://www.bilibili.com").await?;
+        chrome.switch_to_tab(&tab).await?;
+        sleep(Duration::from_secs(2)).await;
+        let interactive_rects = chrome.get_interactive_rects().await?;
+        println!("找到 {} 个交互元素", interactive_rects.len());
+        println!("开始测试hover_id方法");
+        chrome.hover_id("19").await?;
+        sleep(Duration::from_secs(2)).await;
+        chrome.quit().await?;
         Ok(())
     }
 
-    /// 获取所有标签页的信息
-    /* 
-    返回一个包含所有标签页信息的列表，每个标签页信息包含：
-    index: 标签页的位置索引
-    title: 标签页的标题
-    url: 标签页的URL
-    is_active: 标签页是否当前可见
-    is_controlled: 标签页是否被当前控制
-     */
-    pub async fn get_tabs_information(&self) -> Result<Vec<TabInfo>> {
-        let mut tabs_info = Vec::new();
+    #[tokio::test]
+    async fn test_fill_id() -> WebDriverResult<()> {
+        let mut chrome = Chrome::new().await?;
         
-        // 遍历所有标签页
-        for (tab_id, tab_info) in &self.tabs {
-            // 获取标签页的可见状态
-            let is_visible = tab_info.tab.evaluate("document.visibilityState", false)
-                .ok()
-                .and_then(|r| r.value)
-                .and_then(|v| v.as_str().map(|s| s == "visible"))
-                .unwrap_or(false);
-                
-            let title = tab_info.tab.get_title().unwrap_or_default();
-            let url = tab_info.tab.get_url();
-            
-            // 更新标签页信息
-            let info = TabInfo {
-                tab: tab_info.tab.clone(),
-                index: tab_info.index,
-                title,
-                url,
-                is_active: is_visible,
-                is_controlled: Some(*tab_id) == self.current_tab_id,
-            };
-            
-            tabs_info.push(info);
+        let tab = chrome.new_tab("https://www.bilibili.com").await?;
+        chrome.switch_to_tab(&tab).await?;
+        sleep(Duration::from_secs(2)).await;
+        
+        // 获取交互元素信息
+        let interactive_rects = chrome.get_interactive_rects().await?;
+        println!("找到 {} 个交互元素", interactive_rects.len());
+        
+        println!("开始测试fill_id方法，输入: 小约翰可汗");
+        chrome.fill_id(
+            "19",
+            "小约翰可汗",
+            true,  // press_enter
+            true   // delete_existing_text
+        ).await?;
+        
+        println!("成功输入文本并按下回车");
+        sleep(Duration::from_secs(3)).await;
+        
+        // 检查当前URL是否包含搜索内容
+        let current_url = chrome.get_url().await?;
+        println!("当前URL: {}", current_url);
+        
+        if current_url.contains("bilibili") {
+            println!("测试成功：搜索功能正常工作");
+        } else {
+            println!("搜索可能没有正确执行");
         }
-        
-        // 按索引排序
-        tabs_info.sort_by_key(|info| info.index);
-        
-        Ok(tabs_info)
-    }
-
-    /// 元素交互
-    // 点击具有特定 __elementId 属性的元素。它能处理右键点击、按住点击、在单标签模式下阻止新窗口打开，以及检测点击后触发的下载或新页面
-    pub async fn click_id(&mut self, _element_id: &str) -> Result<()> {
-        Ok(())
-    }
     
-
-    // 寻找目标元素（很重要的方法，涉及多个步骤，未测试）
-    /* 其中element_id 代表页面上交互元素的唯一标识符，它是由 page_script.js 中扫描所有的交互元素
-       为交互元素分配唯一ID，然后 page_script.js 中的getInteractiveRects 返回所有交互元素及其
-       element_id, add_set_of_mark() 创建连续的数字ID映射到原始的elememt_id,工具参数使用ID
-       工具参数接收数字ID，通过element_id_mapping 转化为原始的element_id,hover_id 使用element_id
-       定位并操作元素
-       -JavaScript扫描 → page_script.js 识别交互元素并分配 __elementId
-       -元素信息收集 → playwright_controller.py 获取元素矩形和属性信息
-       -ID映射创建 → _set_of_mark.py 创建用户友好的数字ID映射
-       -工具调用 → _web_surfer.py 接收数字ID并转换为原始ID
-       -元素定位 → playwright_controller.py 使用 __elementId 定位元素
-       -动画执行 → animation_utils.py 执行光标动画和元素高亮
-       -鼠标悬停 → playwright_controller.py 执行实际的鼠标悬停操作
-       */
-    pub async fn hover_id(&mut self, element_id: &str) -> Result<()> {
-        let tab = self.current_tab.as_ref()
-            .ok_or_else(|| anyhow!("没有活跃的标签页"))?;
         
-        tab.wait_until_navigated().context("等待页面导航完成失败")?;
-
-        // 1. 查找元素
-        let _element = tab
-            .wait_for_element(&format!(r#"[__elementId="{}"]"#, element_id))
-            .with_context(|| format!("未找到元素 ID 为 {} 的元素", element_id))?;
-
-        // 2. 添加黄色边框
-        let js_add_border = format!(
-            "document.getElementById('{}').style.border = '2px solid yellow';",
-            element_id
-        );
-        tab.evaluate(&js_add_border, false)
-            .context("添加黄色边框失败")?;
-
-        // 3. 确保元素在视图内
-        let js_scroll_into_view = format!(
-            "document.getElementById('{}').scrollIntoView({{ behavior: 'smooth', block: 'center', inline: 'center' }});",
-            element_id
-        );
-        tab.evaluate(&js_scroll_into_view, false)
-            .context("滚动元素到视图内失败")?;
-
-        // 4. 进行滚动
-        sleep(Duration::from_millis(800)).await;
-
-        // 5. 获取元素中心坐标
-        let js_get_center = format!(
-            "const el = document.getElementById('{}');
-            if (!el) throw new Error('Element not found');
-            const rect = el.getBoundingClientRect();
-            [rect.left + rect.width / 2, rect.top + rect.height / 2];", element_id
-        );
-
-        let coords: Vec<f64> = tab
-            .evaluate(&js_get_center, false)?
-            .value
-            .and_then(|v| v.as_array().map(|arr| {
-                arr.iter()
-                    .filter_map(|item| item.as_f64())
-                    .collect()
-                }))
-                .unwrap_or_default();
-
-        if coords.len() != 2 {
-            return Err(anyhow!("无法获取元素中心坐标"));
-        }
-
-        let center_x = coords[0] as i32;
-        let center_y = coords[1] as i32;
-
-        // 6. 在悬停前移除黄色边框
-        let js_remove_border = format!(
-            "document.getElementById('{}').style.border = '';",
-            element_id
-        );
-        tab.evaluate(&js_remove_border, false)
-            .context("移除黄色边框失败")?;
-
-        // 8.执行悬停
-        self.hover_coords(center_x, center_y)
-            .await
-            .context("悬停到元素中心失败")?;
-
+        sleep(Duration::from_secs(2)).await;
+        chrome.quit().await?;
         Ok(())
     }
-*/
+}

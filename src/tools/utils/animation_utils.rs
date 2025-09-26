@@ -135,4 +135,5 @@ impl AnimationUtils {
         self.last_cursor_position = (0.0, 0.0);
         Ok(())
     }
+
 }

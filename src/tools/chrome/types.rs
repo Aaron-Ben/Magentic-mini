@@ -60,31 +60,26 @@ pub struct InteractiveRegion {
     pub rects: Vec<Rect>,
 }
 
-// #[derive(Clone)]
-// pub struct TabInfo {
-//     // 适用于多线程的环境中，Tab 对象需要在多个组件间共享
-//     pub tab: Arc<Tab>,
-//     // 对于headless_chrome来说，并不直接提供一个有序的列表来访问标签页。相反，通常使用标签页的 ID 来进行操作
-//     // 这里仿写一个index
-//     pub index: usize,
-//     pub title: String,
-//     pub url: String,
-//     pub is_active: bool,
-//     pub is_controlled: bool,
-// }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TabInfo {
+    pub index: usize,
+    pub title: String,
+    pub url: String,
+    pub is_active: bool,
+    pub is_controlled: bool,
+}
 
-// impl TabInfo{
-//     pub fn new(tab: Arc<Tab>, index: usize, title: String, url: String, is_active: bool) -> Self {
-//         Self {
-//             tab,
-//             index,
-//             title,
-//             url,
-//             is_active,
-//             is_controlled: false,
-//         }
-//     }
-// }
+impl TabInfo{
+    pub fn new(index: usize, title: String, url: String, is_active: bool) -> Self {
+        Self {
+            index,
+            title,
+            url,
+            is_active,
+            is_controlled: false,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MetaTags {
