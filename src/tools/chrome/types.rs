@@ -23,7 +23,7 @@ pub enum MetadataError {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Rect {
+pub struct DOMRectangle{
     pub bottom: f64,
     pub height: f64,
     pub left: f64,
@@ -57,7 +57,7 @@ pub struct InteractiveRegion {
     pub aria_name: String,
     #[serde(rename = "v-scrollable")]
     pub v_scrollable: bool,
-    pub rects: Vec<Rect>,
+    pub rects: Vec<DOMRectangle>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -32,14 +32,14 @@ impl UrlStatusManager {
         }
     }
 
-    pub fn set_url_status(&mut self, url: &str, status: UrlStatus) {
+    pub fn _set_url_status(&mut self, url: &str, status: UrlStatus) {
         if let Some(statuses) = &mut self.url_statuses {
             let cleaned_url = url.trim().trim_end_matches('/').to_string();
             statuses.insert(cleaned_url, status);
         }
     }
 
-    fn is_url_match(&self, registered_url: &str, proposed_url: &str) -> bool {
+    fn _is_url_match(&self, registered_url: &str, proposed_url: &str) -> bool {
         let reg_url = if registered_url.contains("://") {
         registered_url.to_string()
         } else {
@@ -118,26 +118,26 @@ impl UrlStatusManager {
         true
     }
 
-    pub fn is_url_blocked(&self, url: &str) -> bool {
+    pub fn _is_url_blocked(&self, url: &str) -> bool {
         self.url_block_list
             .as_ref()
-            .map_or(false, |list|list.iter().any(|site|self.is_url_match(site,url)))
+            .map_or(false, |list|list.iter().any(|site|self._is_url_match(site,url)))
     }
 
-    pub fn is_url_rejected(&self, url: &str) -> bool {
-        if self.is_url_blocked(url) {
+    pub fn _is_url_rejected(&self, url: &str) -> bool {
+        if self._is_url_blocked(url) {
             return true;
         }
 
         self.url_statuses.as_ref().map_or(false, |statuses| {
             statuses
                 .iter()
-                .any(|(site, status)| self.is_url_match(site, url) && *status == UrlStatus::Rejected)
+                .any(|(site, status)| self._is_url_match(site, url) && *status == UrlStatus::Rejected)
         })
     }
 
-    pub fn is_url_allowed(&self, url: &str) -> bool {
-        if self.is_url_blocked(url) {
+    pub fn _is_url_allowed(&self, url: &str) -> bool {
+        if self._is_url_blocked(url) {
             return false;
         }
 
@@ -148,11 +148,11 @@ impl UrlStatusManager {
         self.url_statuses.as_ref().map_or(false, |statuses| {
             statuses
                 .iter()
-                .any(|(site, status)| self.is_url_match(site, url) && *status == UrlStatus::Allowed)
+                .any(|(site, status)| self._is_url_match(site, url) && *status == UrlStatus::Allowed)
         })
     }
 
-    pub fn get_allowed_sites(&self) -> Option<Vec<String>> {
+    pub fn _get_allowed_sites(&self) -> Option<Vec<String>> {
         self.url_statuses.as_ref().map(|statuses| {
             statuses
                 .iter()
@@ -162,7 +162,7 @@ impl UrlStatusManager {
         })
     }
 
-    pub fn get_rejected_sites(&self) -> Option<Vec<String>> {
+    pub fn _get_rejected_sites(&self) -> Option<Vec<String>> {
         self.url_statuses.as_ref().map(|statuses| {
             statuses
                 .iter()
@@ -172,7 +172,7 @@ impl UrlStatusManager {
         })
     }
 
-    pub fn get_blocked_sites(&self) -> Option<&Vec<String>> {
+    pub fn _get_blocked_sites(&self) -> Option<&Vec<String>> {
         self.url_block_list.as_ref()
     }
 }

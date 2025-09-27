@@ -138,7 +138,7 @@ impl WebpageTextUtils {
         Self { driver }
     }
 
-    pub async fn get_all_webpage_text(&self, n_lines: Option<usize>) -> Result<String,WebpageTextError> {
+    pub async fn _get_all_webpage_text(&self, n_lines: Option<usize>) -> Result<String,WebpageTextError> {
         let n_lines = n_lines.unwrap_or(50);
 
         // 查找body元素：WebDriverError 自动转换为 WebpageTextError
@@ -162,7 +162,7 @@ impl WebpageTextUtils {
         Ok(non_empty_lines.join("\n"))
     }
 
-    async fn is_pdf_page(&self) -> Result<bool,WebpageTextError> {
+    async fn _is_pdf_page(&self) -> Result<bool,WebpageTextError> {
         let url = self.driver.current_url().await?;
         if url.to_string().to_lowercase().ends_with(".pdf") {
             return Ok(true);
@@ -195,29 +195,29 @@ impl WebpageTextUtils {
     }
 
     // 网页处理工具：网页（PDF界面）转化为Markdown
-    pub async fn get_page_markdown(&self, max_tokens: i32) -> Result<String,WebpageTextError> {
+    pub async fn _get_page_markdown(&self, max_tokens: i32) -> Result<String,WebpageTextError> {
         self.driver
             .set_implicit_wait_timeout(Duration::from_secs(10))
             .await?;
 
-        if self.is_pdf_page().await? {
-            return self.extract_pdf_content().await;
+        if self._is_pdf_page().await? {
+            return self._extract_pdf_content().await;
         }
 
-        let html = self.get_clean_html().await?;
+        let html = self._get_clean_html().await?;
 
         let markdown = convert_html_to_markdown_with_markitdown(&html)
         .await
         .map_err(|e| WebpageTextError::Custom(format!("markitdown 转换失败: {}", e)))?;
 
         if max_tokens > 0 {
-            self.limit_token(&markdown, max_tokens as usize)
+            self._limit_token(&markdown, max_tokens as usize)
         } else {
             Ok(markdown)
         }
     }
 
-    async fn get_clean_html(&self) -> Result<String,WebpageTextError> {
+    async fn _get_clean_html(&self) -> Result<String,WebpageTextError> {
         let script = r#"
             // 创建文档副本，避免修改原始DOM
             const cleanDoc = document.cloneNode(true);
@@ -275,7 +275,7 @@ impl WebpageTextUtils {
     }
     
     // Tokenizen 枚举 --> CoreBPE 实例
-    fn tokenizer_to_core_bpe(tokenizer: Tokenizer) -> Result<CoreBPE,anyhow::Error> {
+    fn _tokenizer_to_core_bpe(tokenizer: Tokenizer) -> Result<CoreBPE,anyhow::Error> {
         match tokenizer {
             Tokenizer::O200kBase => o200k_base(),    // 对应 O200kBase 编码方案
             Tokenizer::Cl100kBase => cl100k_base(),  // 对应 Cl100kBase 编码方案（GPT-4/3.5 用）
@@ -287,7 +287,7 @@ impl WebpageTextUtils {
     }
 
     // 限制tokn数量
-    fn limit_token(&self, content: &str, max_tokens: usize) -> Result<String, WebpageTextError>{
+    fn _limit_token(&self, content: &str, max_tokens: usize) -> Result<String, WebpageTextError>{
         if content.is_empty() {
             return Ok(String::new())
         }
@@ -296,7 +296,7 @@ impl WebpageTextUtils {
         let tokenizer_type = get_tokenizer(model).unwrap();
 
         // Tokenizer 枚举转为真正的 CoreBPE 实例
-        let bpe = Self::tokenizer_to_core_bpe(tokenizer_type)?;
+        let bpe = Self::_tokenizer_to_core_bpe(tokenizer_type)?;
 
         let tokens = bpe.encode_with_special_tokens(content);
         let limited_tokens = if tokens.len() > max_tokens {
@@ -314,11 +314,11 @@ impl WebpageTextUtils {
     }
 
     // 从pdf 提取文本（高级实现，更好的错误处理）
-    async fn extract_pdf_content(&self) -> Result<String,WebpageTextError> {
+    async fn _extract_pdf_content(&self) -> Result<String,WebpageTextError> {
         let url = self.driver.current_url().await?;
         
 
-        let browser_text = self.extract_pdf_browser().await?;
+        let browser_text = self._extract_pdf_browser().await?;
         if !browser_text.is_empty() && browser_text.len() > 100 {
             return Ok(browser_text)
         }
@@ -352,7 +352,7 @@ impl WebpageTextUtils {
     }
 
     // 从 pdf 提取文本（底层封装）
-    async fn extract_pdf_browser(&self) -> Result<String,WebpageTextError> {
+    async fn _extract_pdf_browser(&self) -> Result<String,WebpageTextError> {
         let script = r#"
             // For PDF.js viewer
             if (window.PDFViewerApplication) {

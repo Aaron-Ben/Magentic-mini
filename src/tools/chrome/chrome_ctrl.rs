@@ -41,16 +41,16 @@ impl Chrome {
         unimplemented!();
     }
 
-    pub async fn get_url(&self) -> Result<String,WebDriverError> {
+    pub async fn _get_url(&self) -> Result<String,WebDriverError> {
         let url = self.driver.current_url().await?;
         Ok(url.to_string())
     }
 
-    pub async fn get_title(&self) -> Result<String,WebDriverError> {
+    pub async fn _get_title(&self) -> Result<String,WebDriverError> {
         self.driver.title().await.map_err(|e| e.into())
     }
 
-    pub async fn wait_for_page_ready(&self) -> Result<(),WebDriverError> {
+    pub async fn _wait_for_page_ready(&self) -> Result<(),WebDriverError> {
         self.driver.execute(
             r#"
             return new Promise((resolve) => {
@@ -69,7 +69,7 @@ impl Chrome {
     }
 
     /// 标签页的管理
-    async fn new_tab(&self, url: &str) -> WebDriverResult<WindowHandle> {
+    async fn _new_tab(&self, url: &str) -> WebDriverResult<WindowHandle> {
         let url = url.trim();
         self.driver.execute(&format!("window.open('{}', 'www.google.com');", url), vec![]).await?;
         
@@ -98,7 +98,7 @@ impl Chrome {
     is_active: 标签页是否当前可见
     is_controlled: 标签页是否被当前控制
      */
-    pub async fn get_tabs_information(&self) -> Result<Vec<TabInfo>, WebDriverError> {
+    pub async fn _get_tabs_information(&self) -> Result<Vec<TabInfo>, WebDriverError> {
         let handles = self.driver.windows().await?;
         let current_handle = self.driver.window().await?;
         let mut tabs_info = Vec::new();
@@ -133,49 +133,49 @@ impl Chrome {
         Ok(tabs_info)
     }
 
-    async fn switch_to_tab(&self, handle: &WindowHandle) -> WebDriverResult<()> {
+    async fn _switch_to_tab(&self, handle: &WindowHandle) -> WebDriverResult<()> {
         self.driver.switch_to_window(handle.clone()).await?;
         Ok(())
     }
 
-    async fn close_tab(&self) -> WebDriverResult<()> {
+    async fn _close_tab(&self) -> WebDriverResult<()> {
         self.driver.close_window().await?;
         Ok(())
     }
 
-    async fn go_back(&self) -> WebDriverResult<()> {
+    async fn _go_back(&self) -> WebDriverResult<()> {
         self.driver.back().await?;
         Ok(())
     }
 
-    async fn go_forward(&self) -> WebDriverResult<()> {
+    async fn _go_forward(&self) -> WebDriverResult<()> {
         self.driver.forward().await?;
         Ok(())
     }
 
-    async fn refresh(&self) -> WebDriverResult<()> {
+    async fn _refresh(&self) -> WebDriverResult<()> {
         self.driver.refresh().await?;
         Ok(())
     }
 
     /// 滚动管理
-    async fn page_up(&self) -> WebDriverResult<()> {
+    async fn _page_up(&self) -> WebDriverResult<()> {
         self.driver.execute("window.scrollBy({ top: -window.innerHeight / 2, behavior: 'smooth' });", vec![]).await?;
         Ok(())
     }
 
-    async fn page_down(&self) -> WebDriverResult<()> {
+    async fn _page_down(&self) -> WebDriverResult<()> {
         self.driver.execute("window.scrollBy({ top: window.innerHeight / 2, behavior: 'smooth' });", vec![]).await?;
         Ok(())
     }
 
-    async fn scroll_custom(&self, dir: &str, pixels: i32) -> WebDriverResult<()> {
+    async fn _scroll_custom(&self, dir: &str, pixels: i32) -> WebDriverResult<()> {
         let scroll_amount = if dir == "up" { -pixels } else { pixels };
         self.driver.execute(&format!("window.scrollBy({{ top: {}, behavior: 'smooth' }});", scroll_amount), vec![]).await?;
         Ok(())
     }
 
-    async fn scroll_element(&self, element_id: &str, dir: &str, pixels: i32) -> WebDriverResult<()> {
+    async fn _scroll_element(&self, element_id: &str, dir: &str, pixels: i32) -> WebDriverResult<()> {
         let scroll_amount = if dir == "up" { -pixels } else { pixels };
         let script = format!(
             r#"
@@ -196,27 +196,27 @@ impl Chrome {
     }
 
     /// 鼠标管理
-    async fn click_coords(&mut self, x: i32, y: i32, button: &str) -> WebDriverResult<()> {
+    async fn _click_coords(&mut self, x: i32, y: i32, button: &str) -> WebDriverResult<()> {
         match button {
             "back" => {
-                self.go_back().await?;
+                self._go_back().await?;
             }
             "forward" => {
-                self.go_forward().await?;
+                self._go_forward().await?;
             }
             "wheel" => {
                 let (start_x, start_y) = self.anim_utils.last_cursor_position;
-                self.anim_utils.gradual_cursor_animation(&self.driver, start_x, start_y, x as f64, y as f64, 10, 50)
+                self.anim_utils._gradual_cursor_animation(&self.driver, start_x, start_y, x as f64, y as f64, 10, 50)
                     .await?;
                 self.driver.as_ref().execute(
                     &format!("window.scrollBy({{x: {}, y: {}}});", x, y),
                     vec![],
                 ).await?;
-                self.anim_utils.cleanup_animations(&self.driver).await?;
+                self.anim_utils._cleanup_animations(&self.driver).await?;
             }
             "left" | "right" => {
                 let (start_x, start_y) = self.anim_utils.last_cursor_position;
-                self.anim_utils.gradual_cursor_animation(&self.driver, start_x, start_y, x as f64, y as f64, 10, 50)
+                self.anim_utils._gradual_cursor_animation(&self.driver, start_x, start_y, x as f64, y as f64, 10, 50)
                     .await?;
 
                 let action_chain = self.driver.as_ref().action_chain()
@@ -229,7 +229,7 @@ impl Chrome {
                 };
 
                 action_chain.perform().await?;
-                self.anim_utils.cleanup_animations(&self.driver).await?;
+                self.anim_utils._cleanup_animations(&self.driver).await?;
             }
             _ => {
                 let error_info = WebDriverErrorInfo::new(format!("不支持的按钮类型: {}", button));
@@ -239,30 +239,30 @@ impl Chrome {
         Ok(())
     }
 
-    async fn double_coords(&mut self, x: i32, y: i32) -> WebDriverResult<()> {
+    async fn _double_coords(&mut self, x: i32, y: i32) -> WebDriverResult<()> {
         let (start_x, start_y) = self.anim_utils.last_cursor_position;
-        self.anim_utils.gradual_cursor_animation(&self.driver, start_x, start_y, x as f64, y as f64, 10, 50)
+        self.anim_utils._gradual_cursor_animation(&self.driver, start_x, start_y, x as f64, y as f64, 10, 50)
             .await?;
         self.driver.as_ref().action_chain()
             .move_to(x.into(), y.into())
             .double_click()
             .perform().await?;
-        self.anim_utils.cleanup_animations(&self.driver).await?;
+        self.anim_utils._cleanup_animations(&self.driver).await?;
         Ok(())
     }
 
-    async fn hover_coords(&mut self, x: i32, y: i32) -> WebDriverResult<()> {
+    async fn _hover_coords(&mut self, x: i32, y: i32) -> WebDriverResult<()> {
         let (start_x, start_y) = self.anim_utils.last_cursor_position;
-        self.anim_utils.gradual_cursor_animation(&self.driver, start_x, start_y, x as f64, y as f64, 10, 50)
+        self.anim_utils._gradual_cursor_animation(&self.driver, start_x, start_y, x as f64, y as f64, 10, 50)
             .await?;
         self.driver.as_ref().action_chain()
             .move_to(x.into(), y.into())
             .perform().await?;
-        self.anim_utils.cleanup_animations(&self.driver).await?;
+        self.anim_utils._cleanup_animations(&self.driver).await?;
         Ok(())
     }
 
-    async fn drag_coords(&mut self, path: Vec<(i32, i32)>) -> WebDriverResult<()> {
+    async fn _drag_coords(&mut self, path: Vec<(i32, i32)>) -> WebDriverResult<()> {
         if path.is_empty() {
             return Ok(());
         }
@@ -291,7 +291,7 @@ impl Chrome {
         let mut last_y = start_y;
 
         for &(x, y) in &path[1..] {
-            self.anim_utils.gradual_cursor_animation(&self.driver, last_x as f64, last_y as f64, x as f64, y as f64, 10, 50).await?;
+            self.anim_utils._gradual_cursor_animation(&self.driver, last_x as f64, last_y as f64, x as f64, y as f64, 10, 50).await?;
             let dx = x - last_x;
             let dy = y - last_y;
             action_chain = action_chain.move_by_offset(dx.into(), dy.into());
@@ -302,14 +302,14 @@ impl Chrome {
         // 第三步：释放鼠标
         action_chain.release().perform().await?;
 
-        self.anim_utils.cleanup_animations(&self.driver).await?;
+        self.anim_utils._cleanup_animations(&self.driver).await?;
         Ok(())
     }
 
 
     /// 页面信息获取
     // 截图信息
-    async fn get_screenshot(&self, path: Option<&str>) -> WebDriverResult<Vec<u8>> {
+    async fn _get_screenshot(&self, path: Option<&str>) -> WebDriverResult<Vec<u8>> {
         let png_data = self.driver.screenshot_as_png().await?;
         if let Some(path_str) = path {
             let path = Path::new(path_str);
@@ -322,7 +322,7 @@ impl Chrome {
     }
 
     // 扫描页面并返回所有可交互元素的位置，大小和类型信息，这些元素会被注入一个唯一的__elementId,以便后续操作
-    async fn get_interactive_rects(&self) -> Result<HashMap<String,InteractiveRegion>, WebDriverError> {
+    async fn _get_interactive_rects(&self) -> Result<HashMap<String,InteractiveRegion>, WebDriverError> {
 
         let init_script = include_str!("page_script.js");
         self.driver
@@ -360,7 +360,7 @@ impl Chrome {
     }
 
     // 获取当前适口的尺寸，缩放比例和滚动位置
-    async fn get_visual_viewport(&self) -> Result<VisualViewport,WebDriverError> {
+    async fn _get_visual_viewport(&self) -> Result<VisualViewport,WebDriverError> {
 
         let init_script = include_str!("page_script.js");
         self.driver
@@ -449,7 +449,7 @@ impl Chrome {
     }
     最终的返回应该是metadata = {xxx}
      */ 
-    async fn get_page_metadata_data(&self) -> Result<PageMetadata, WebDriverError> {
+    async fn _get_page_metadata_data(&self) -> Result<PageMetadata, WebDriverError> {
         let init_script = include_str!("page_script.js");
         self.driver
             .execute(init_script, Vec::new())
@@ -461,8 +461,8 @@ impl Chrome {
             .await?;
         
         // 获取当前页面信息
-        let title = self.get_title().await.ok().unwrap_or_default();
-        let url = self.get_url().await.ok().unwrap_or_default();
+        let title = self._get_title().await.ok().unwrap_or_default();
+        let url = self._get_url().await.ok().unwrap_or_default();
         
         // 解析元数据
         let metadata_json: serde_json::Value = result.json().clone();
@@ -500,18 +500,18 @@ impl Chrome {
         Ok(page_metadata)
     }
 
-    async fn get_all_webpage_text(&self,n_lines: Option<usize>) -> Result<String, WebDriverError> {
+    async fn _get_all_webpage_text(&self,n_lines: Option<usize>) -> Result<String, WebDriverError> {
         
         let text_util = WebpageTextUtils::new(self.driver.clone());
         let page_text = text_util
-            .get_all_webpage_text(n_lines)
+            ._get_all_webpage_text(n_lines)
             .await
-            .map_err(Self::webpage_err_to_webdriver_err)?;
+            .map_err(Self::_webpage_err_to_webdriver_err)?;
 
         Ok(page_text)
     }
 
-    async fn get_visible_text(&self) -> Result<String, WebDriverError> {
+    async fn _get_visible_text(&self) -> Result<String, WebDriverError> {
         let init_script = include_str!("page_script.js");
         self.driver
             .execute(init_script, Vec::new())
@@ -527,41 +527,41 @@ impl Chrome {
     }
 
     // 网页内容转化为Markdown
-    async fn get_page_markdown(&self,max_tokens:usize) -> Result<String, WebDriverError> {
+    async fn _get_page_markdown(&self,max_tokens:usize) -> Result<String, WebDriverError> {
         
         let markdown_utils = WebpageTextUtils::new(self.driver.clone());
         let markdown = markdown_utils
-            .get_page_markdown(max_tokens.try_into().unwrap())
+            ._get_page_markdown(max_tokens.try_into().unwrap())
             .await
-            .map_err(Self::webpage_err_to_webdriver_err)?;
+            .map_err(Self::_webpage_err_to_webdriver_err)?;
         println!("Markdown content:\n{}",markdown);
         Ok(markdown)
     }
     
     // 生成一个包含页面标题，URL，滚动位置，可见文本和元数据的综合描述，用以向AI代理汇报当前的状态
-    pub async fn describe_page(
+    pub async fn _describe_page(
         &self,
         get_screenshot: bool,
     ) -> Result<(String, Option<Vec<u8>>, String), WebDriverError> {
         // 确保页面已加载完成
-        self.wait_for_page_ready().await?;
+        self._wait_for_page_ready().await?;
         
         // 获取截图
         let screenshot = if get_screenshot {
-            Some(self.get_screenshot(None).await?)
+            Some(self._get_screenshot(None).await?)
         } else {
             None
         };
         
         // 获取页面标题和URL
-        let page_title = self.get_title().await?;
-        let page_url = self.get_url().await?;
+        let page_title = self._get_title().await?;
+        let page_url = self._get_url().await?;
         
         // 获取视口信息
-        let viewport = self.get_visual_viewport().await?;
+        let viewport = self._get_visual_viewport().await?;
         
         // 获取可见文本
-        let viewport_text = self.get_visible_text().await?;
+        let viewport_text = self._get_visible_text().await?;
         
         // 计算百分比
         let percent_visible = if viewport.scroll_height > 0.0 {
@@ -586,7 +586,7 @@ impl Chrome {
         };
         
         // 获取页面元数据
-        let page_metadata = self.get_page_metadata_data().await?;
+        let page_metadata = self._get_page_metadata_data().await?;
         let metadata_json = serde_json::to_string_pretty(&page_metadata)
             .unwrap_or_else(|_| "{}".to_string());
         
@@ -607,7 +607,7 @@ impl Chrome {
     }
 
     // 点击具有特定 __elementId 属性的元素。它能处理右键点击、按住点击、在单标签模式下阻止新窗口打开，以及检测点击后触发的下载或新页面
-    pub async fn click_id(
+    pub async fn _click_id(
         &mut self,
         identifier: &str,
     ) -> Result<(), WebDriverError> {
@@ -635,12 +635,12 @@ impl Chrome {
     -动画执行 → animation_utils.py 执行光标动画和元素高亮
     -鼠标悬停 → playwright_controller.py 执行实际的鼠标悬停操作
     */
-    pub async fn hover_id(
+    pub async fn _hover_id(
         &mut self,
         identifier: &str,
     ) -> Result<(), WebDriverError> {
         // 确保页面已加载完成
-        self.wait_for_page_ready().await?;
+        self._wait_for_page_ready().await?;
         
         // 等待元素可见
         let _element_selector = format!("[__elementId='{}']", identifier);
@@ -680,11 +680,11 @@ impl Chrome {
         // 执行悬停操作
         if self.animate_actions {
             // 添加光标动画
-            self.anim_utils.add_cursor_box(&self.driver, identifier).await?;
+            self.anim_utils._add_cursor_box(&self.driver, identifier).await?;
             
             // 移动光标到元素中心
             let (start_x, start_y) = self.anim_utils.last_cursor_position;
-            self.anim_utils.gradual_cursor_animation(
+            self.anim_utils._gradual_cursor_animation(
                 &self.driver,
                 start_x,
                 start_y,
@@ -702,7 +702,7 @@ impl Chrome {
                 .perform().await?;
             
             // 清理动画效果
-            self.anim_utils.remove_cursor_box(&self.driver, identifier).await?;
+            self.anim_utils._remove_cursor_box(&self.driver, identifier).await?;
         } else {
             // 直接移动到元素中心
             self.driver.action_chain()
@@ -715,7 +715,7 @@ impl Chrome {
 
     /// 向具有特定标识符的元素填充文本(键盘输入)
     /// 适用于文本输入框、文本区域和下拉框
-    pub async fn fill_id(
+    pub async fn _fill_id(
         &mut self,
         identifier: &str,
         value: &str,
@@ -723,7 +723,7 @@ impl Chrome {
         delete_existing_text: bool,
     ) -> Result<(), WebDriverError> {
         // 确保页面已加载完成
-        self.wait_for_page_ready().await?;
+        self._wait_for_page_ready().await?;
         
         // 等待元素可见
         let _element_selector = format!("[__elementId='{}']", identifier);
@@ -778,11 +778,11 @@ impl Chrome {
         // 执行填充操作
         if self.animate_actions {
             // 添加光标动画
-            self.anim_utils.add_cursor_box(&self.driver, identifier).await?;
+            self.anim_utils._add_cursor_box(&self.driver, identifier).await?;
             
             // 移动光标到元素中心
             let (start_x, start_y) = self.anim_utils.last_cursor_position;
-            self.anim_utils.gradual_cursor_animation(
+            self.anim_utils._gradual_cursor_animation(
                 &self.driver,
                 start_x,
                 start_y,
@@ -840,18 +840,18 @@ impl Chrome {
         
         // 清理动画效果
         if self.animate_actions {
-            self.anim_utils.remove_cursor_box(&self.driver, identifier).await?;
+            self.anim_utils._remove_cursor_box(&self.driver, identifier).await?;
         }
         
         Ok(())
     }
 
-    async fn quit(self) -> Result<(), WebDriverError> {
+    async fn _quit(self) -> Result<(), WebDriverError> {
         <thirtyfour::WebDriver as Clone>::clone(&self.driver).quit().await?;
         Ok(())
     }
 
-    pub fn webpage_err_to_webdriver_err(webpage_err: WebpageTextError) -> WebDriverError {
+    pub fn _webpage_err_to_webdriver_err(webpage_err: WebpageTextError) -> WebDriverError {
         match webpage_err {
             WebpageTextError::WebDriver(inner_err) => inner_err,
             WebpageTextError::Http(inner_err) => WebDriverError::UnknownError(
@@ -892,31 +892,31 @@ mod test {
     #[tokio::test]
     async fn test_chrome() -> WebDriverResult<()> {
         let chrome = Chrome::new().await?;
-        let tab1 = chrome.new_tab("https://www.bilibili.com").await?;
-        chrome.switch_to_tab(&tab1).await?;
+        let tab1 = chrome._new_tab("https://www.bilibili.com").await?;
+        chrome._switch_to_tab(&tab1).await?;
         sleep(Duration::from_secs(2)).await;
-        let cur_url = chrome.get_url().await?;
+        let cur_url = chrome._get_url().await?;
         println!("当前Url:{}",cur_url);
-        chrome.get_interactive_rects().await?;
+        chrome._get_interactive_rects().await?;
         
         sleep(Duration::from_secs(2)).await;
         // 关闭浏览器
-        chrome.quit().await?;
+        chrome._quit().await?;
         Ok(())
     }
 
     #[tokio::test]
     async fn test_hover_id() -> WebDriverResult<()> {
         let mut chrome = Chrome::new().await?;
-        let tab = chrome.new_tab("https://www.bilibili.com").await?;
-        chrome.switch_to_tab(&tab).await?;
+        let tab = chrome._new_tab("https://www.bilibili.com").await?;
+        chrome._switch_to_tab(&tab).await?;
         sleep(Duration::from_secs(2)).await;
-        let interactive_rects = chrome.get_interactive_rects().await?;
+        let interactive_rects = chrome._get_interactive_rects().await?;
         println!("找到 {} 个交互元素", interactive_rects.len());
         println!("开始测试hover_id方法");
-        chrome.hover_id("19").await?;
+        chrome._hover_id("19").await?;
         sleep(Duration::from_secs(2)).await;
-        chrome.quit().await?;
+        chrome._quit().await?;
         Ok(())
     }
 
@@ -924,16 +924,16 @@ mod test {
     async fn test_fill_id() -> WebDriverResult<()> {
         let mut chrome = Chrome::new().await?;
         
-        let tab = chrome.new_tab("https://www.bilibili.com").await?;
-        chrome.switch_to_tab(&tab).await?;
+        let tab = chrome._new_tab("https://www.bilibili.com").await?;
+        chrome._switch_to_tab(&tab).await?;
         sleep(Duration::from_secs(2)).await;
         
         // 获取交互元素信息
-        let interactive_rects = chrome.get_interactive_rects().await?;
+        let interactive_rects = chrome._get_interactive_rects().await?;
         println!("找到 {} 个交互元素", interactive_rects.len());
         
         println!("开始测试fill_id方法，输入: 小约翰可汗");
-        chrome.fill_id(
+        chrome._fill_id(
             "19",
             "小约翰可汗",
             true,  // press_enter
@@ -944,7 +944,7 @@ mod test {
         sleep(Duration::from_secs(3)).await;
         
         // 检查当前URL是否包含搜索内容
-        let current_url = chrome.get_url().await?;
+        let current_url = chrome._get_url().await?;
         println!("当前URL: {}", current_url);
         
         if current_url.contains("bilibili") {
@@ -955,7 +955,7 @@ mod test {
     
         
         sleep(Duration::from_secs(2)).await;
-        chrome.quit().await?;
+        chrome._quit().await?;
         Ok(())
     }
 }

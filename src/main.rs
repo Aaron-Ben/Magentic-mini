@@ -1,5 +1,9 @@
 mod agents;
 mod llm;
+mod tools;
+mod orchestrator;
+mod types;
+mod team;
 
 use anyhow::Result;
 

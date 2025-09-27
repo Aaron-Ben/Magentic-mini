@@ -2,13 +2,14 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::tools::chrome::types::{InteractiveRegion};
+
+use crate::tools::chrome::types::InteractiveRegion;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct FunctionCall {
     pub id: String,             // 要调用函数的名称
     pub arguments: String,      // 传递给函数的参数，可能包含多种类型，序列化为JSON字符串
-    pub name: Option<String>,   // 函数调用的唯一标识符
+    pub name: String,           // 函数调用的唯一标识符
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -38,6 +39,7 @@ pub enum LLMOutput {
     Text(String),
     FunctionCalls(Vec<FunctionCall>)
 }
+
 
 #[derive(Debug)]
 pub struct LLMResponse {
