@@ -1,9 +1,9 @@
 use std::collections::HashMap;
+use anyhow::Result;
 use image::{DynamicImage, Rgba, RgbaImage, ImageBuffer};
 use imageproc::drawing::{draw_hollow_rect_mut, draw_filled_rect_mut, draw_text_mut};
 use imageproc::rect::Rect;
 use rusttype::{Font, Scale, point};
-use std::error::Error;
 
 use crate::tools::chrome::types::{DOMRectangle, InteractiveRegion };
 
@@ -13,13 +13,21 @@ const TOP_NO_LABEL_ZONE: i32 = 20;
 // For this code to compile, replace the path below with a valid font file path.
 const FONT_DATA: &[u8] = include_bytes!("../../../dejavu-sans.book.ttf");
 
+#[derive(Debug)]
+pub struct PageState {
+    pub som_screenshot: DynamicImage,
+    pub visible_rects: Vec<String>,
+    pub rects_above: Vec<String>,
+    pub rects_below: Vec<String>,
+    pub rects: HashMap<String,String>,
+}
 
 
 pub fn _add_set_of_mark(
     screenshot: &[u8],
     rois: &HashMap<String, InteractiveRegion>,
     use_sequential_ids: bool,
-) -> Result<(DynamicImage, Vec<String>, Vec<String>, Vec<String>, HashMap<String, String>), Box<dyn Error>> {
+) -> Result<PageState> {
     let base_img = image::load_from_memory(screenshot)?.to_rgba8();
     let width = base_img.width() as f32;
     let height = base_img.height() as f32;
@@ -95,7 +103,8 @@ pub fn _add_set_of_mark(
     };
 
     // Load font
-    let font = Font::try_from_bytes(FONT_DATA).ok_or("Failed to load font")?;
+    let font = Font::try_from_bytes(FONT_DATA)
+        .ok_or_else(|| anyhow::anyhow!("Failed to load font from embedded bytes"))?;
     let scale = Scale { x: 14.0, y: 14.0 };
 
     // Create overlay
@@ -130,7 +139,13 @@ pub fn _add_set_of_mark(
 
     let final_img = DynamicImage::ImageRgba8(comp);
 
-    Ok((final_img, new_visible_rects, new_rects_above, new_rects_below, id_mapping))
+    Ok(PageState { 
+        som_screenshot: final_img, 
+        visible_rects: new_visible_rects, 
+        rects_above: new_rects_above, 
+        rects_below: new_rects_below, 
+        rects: id_mapping,
+    })
 }
 
 fn _draw_roi(
@@ -139,7 +154,7 @@ fn _draw_roi(
     font: &Font<'_>,
     scale: Scale,
     rect: &DOMRectangle,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<()> {
     let color = Rgba([255, 0, 0, 255]);
     let text_color = Rgba([255, 255, 255, 255]);
 
@@ -193,26 +208,4 @@ fn _draw_roi(
     draw_text_mut(draw, text_color, (text_x as u32).try_into().unwrap(), (text_y as u32).try_into().unwrap(), scale, font, &text);
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_add_set_of_mark() {
-        let screenshot = include_bytes!("screenshot.png");
-        use std::fs;
-
-        // 读取 rois.json 文件内容并反序列化为 HashMap<String, InteractiveRegion>
-        let rois_data = fs::read("src/agents/web_agent/rois.json").expect("无法读取 rois.json 文件");
-        let rois: std::collections::HashMap<String, InteractiveRegion> = serde_json::from_slice(&rois_data).expect("rois.json 解析失败");
-
-        let (img, visible_rects, rects_above, rects_below, id_mapping) = _add_set_of_mark(screenshot, &rois, true).unwrap();
-        img.save("screenshot_with_mark.png").unwrap();
-        println!("visible_rects: {:?}", visible_rects);
-        println!("rects_above: {:?}", rects_above);
-        println!("rects_below: {:?}", rects_below);
-        println!("id_mapping: {:?}", id_mapping);
-    }
 }

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use thirtyfour::prelude::*;
 
+#[derive(Debug)]
 pub struct AnimationUtils {
     pub last_cursor_position: (f64, f64),
 }

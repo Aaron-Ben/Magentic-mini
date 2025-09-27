@@ -1,0 +1,1 @@
+Is this action something that would require human approval before being done? Example: buying a product, submitting a form; but navigating a website, things that can be undone are not irreversible actions.

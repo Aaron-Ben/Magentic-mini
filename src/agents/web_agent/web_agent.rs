@@ -1,37 +1,85 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+
 use thirtyfour::prelude::*;
-use anyhow::Result;
-use crate::agents::web_agent::types::{FunctionCall, ToolSchema};
+use anyhow::{Result, anyhow};
+use crate::agents::web_agent::prompt::WEB_SURFER_SYSTEM_MESSAGE;
+use crate::agents::web_agent::set_of_mark::{PageState, _add_set_of_mark};
+use crate::agents::web_agent::tool_define::DefaultTools;
+use crate::agents::web_agent::types::FunctionCall;
+use crate::tools::chrome::chrome_ctrl::Chrome;
 use crate::tools::chrome::types::InteractiveRegion;
-use crate::types::message::CancellationToken;
+use crate::tools::tool_metadata::ToolSchema;
+use crate::types::message::{CancellationToken, LLMMessage, SystemMessage};
+
+
+pub enum LLMResponse {
+    Text(String),
+    FunctionCalls(Vec<FunctionCall>),
+    Error(String),
+}
 
 #[derive(Debug)]
 pub struct WebAgent {
-    driver: Option<Arc<WebDriver>>,
-    // model_usage: RequestUsage,
+    chrome_ctrl: Option<Chrome>,
+    chat_history: Option<Vec<LLMMessage>>,
+    tools: Vec<ToolSchema>,
+}
+
+impl Default for WebAgent {
+    fn default() -> Self {
+
+        let default_tools = DefaultTools::new()
+        .expect("Failed to load default tools");
+
+        let tools = vec![
+            default_tools.visit_url,
+            default_tools.web_search,
+            default_tools.history_back,
+            default_tools.refresh_page,
+            default_tools.page_up,
+            default_tools.page_down,
+            default_tools.scroll_down,
+            default_tools.scroll_up,
+            default_tools.click,
+            default_tools.click_full,
+            default_tools.input_text,
+            default_tools.scroll_element_down,
+            default_tools.scroll_element_up,
+            default_tools.hover,
+            default_tools.keypress,
+            default_tools.answer_question,
+            default_tools.summarize_page,
+            default_tools.sleep,
+            default_tools.stop_action,
+            default_tools.select_option,
+            default_tools.create_tab,
+            default_tools.switch_tab,
+            default_tools.close_tab,
+            default_tools.upload_file,
+        ];
+
+        Self {
+            chrome_ctrl: None,
+            chat_history: None,
+            tools,
+        }
+    }
 }
 
 impl WebAgent {
     pub async fn new() -> Self {
-        Self {
-            driver:None,
-            // model_usage: RequestUsage::Default,
-        }
+        Self::default()
     }
 
     pub async fn initialize(&mut self) -> Result<(), WebDriverError> {
-        let caps = DesiredCapabilities::chrome();
-        let driver = WebDriver::new("http://localhost:9515", caps).await?;
-        
-        
-        self.driver = Some(Arc::new(driver));
+        self.chrome_ctrl = Some(Chrome::new().await?);
+        self.chat_history = Some(Vec::new());
         Ok(())
     }
 
-    pub fn driver(&self) -> Result<&Arc<WebDriver>, &'static str> {
-        self.driver.as_ref()
-            .ok_or("Browser context is not initialized. Call initialize() first.")
+    pub async fn chrome_mut(&mut self) -> Result<&mut Chrome, &'static str> {
+        self.chrome_ctrl.as_mut()
+            .ok_or("Chrome context is not initialized. Call initialize() first.")
     }
 
     // web_agent的核心，接收用户或者，ent的消息，驱动浏览器进行一系列的操作，并将操作以流的形式（AsyncGenerator）逐步
@@ -98,35 +146,103 @@ impl WebAgent {
 
     /* 观察当前浏览器的状态，构造提示词，调用LLM，返回下一步要执行的动作（思考），以及上下文信息*/
     pub async fn _get_llm_response(
-        self,
-    ) -> Result<()> {
+        &self,
+        // cancellation_token: Option<CancellationToken>,
+    ) -> Result<(
+        LLMResponse,
+        HashMap<String,InteractiveRegion>,
+        Vec<ToolSchema>,
+        HashMap<String,String>,
+        bool,)>
+    {
 
-        // 检查页面存活，可交互，如果失败创建空的页面，避免崩溃
+        // 1. 确保页面可用性
+        self.chrome_ctrl.as_ref().unwrap()._wait_for_page_ready().await?;
+        self.chrome_ctrl.as_ref().unwrap()._get_interactive_rects().await?;
 
-        // 构建对话历史（角色设定，日期，任务目标）
+        // 2. 准备聊天历史
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let history = self.build_history(&today).await?;
 
-        // 保存用户消息的图像，但是移除agent的图像（节省token）【997-1012】
+        // 3. 获取页面状态和元素
+        let page_state = self.get_page_state_and_elements().await?;
 
-        // 获取页面可交互元素，生成标记截图（Set-of-Mark）便于使用编号引用元素，而不是CSS选择器【1014-1020】
+        // // 4. 保存调试截图
+        // self.save_debug_screenshot_if_needed(&screenshot).await?;
 
-        // 获取标签页信息（使其支持多标签页）【1039-1044】
+        // 5. 准备工具和上下文信息
+        let tools = self.prepare_tools().await?;
+        // let context_info = self.get_context_info(&rects, &reverse_element_id_mapping).await?;
 
-        // 动态构建工具列表，根据当前的页面选择哪些工具 【1049-1073】
+        // // 6. 创建提示词
+        // let text_prompt = self.create_prompt(&context_info, &tools).await?;
 
-        // 构造焦点提示，告诉LLM当前那个元素获取了焦点 【1075-1092】
+        // // 7. 添加多模态内容
+        // let history = self.add_multimodal_content(history, &text_prompt, &screenshot).await?;
 
-        // 构造可见（视口内的）/不可见元素（下滑，上滑才能看到的）列表， 【1093-1123】
+        // // 8. 应用 token 限制
+        // let token_limited_history = self.apply_token_limit(history).await?;
 
-        // 获取页面的纯文本内容
+        // // 9. 获取模型响应
+        // let response = self.get_model_response(
+        //     &token_limited_history, 
+        //     &tools, 
+        //     cancellation_token.as_ref()
+        // ).await?;
 
-        // 构造最终的提示词，文本状态以及多模态，其中的som_screenshot(带编号的截图，用于定位元素)  screenshot（原始截图，理解页面） 【1127-1185】
+        // // 10. 处理并返回响应
+        // self.process_response(response, rects, tools, element_id_mapping).await
 
-        // 上下文进行压缩 【裁剪。。。】是否需要长短期记忆？
+        Ok((LLMResponse::Text("".to_string()), HashMap::new(), self.tools.clone(), HashMap::new(), false))
+    }
 
-        // 调用LLM，工具调用 and json 调用（备用的）
+    async fn ensure_page_ready(&self) -> Result<()> {
+        Ok(())
+    }
 
-        // 返回结果
+    async fn build_history(&self,date_today: &str) -> Result<Vec<LLMMessage>> {
+        
+        let existing_history = self
+            .chat_history
+            .as_ref()
+            .ok_or_else(|| anyhow!("Chat history not init"))?;
+        
+        let mut history = vec![
+            LLMMessage::System(SystemMessage { 
+                content: WEB_SURFER_SYSTEM_MESSAGE.replace("{date_today}", date_today)
+            }),
+        ];
 
+        for msg in existing_history {
+            // let filtered_msg = match msg {
+            //     LLMMessage::User(Us)
+            // }
+            history.push(msg.clone());
+        }
+        
+        Ok(history)
+    }
+
+    async fn get_page_state_and_elements(&self) -> Result<PageState> {
+        let rects = self.chrome_ctrl.as_ref().unwrap()._get_interactive_rects().await?;
+        let screenshot = self.chrome_ctrl.as_ref().unwrap()._get_screenshot(None).await?;
+        let result = _add_set_of_mark(&screenshot, &rects, true)?;
+        Ok(result)
+    }
+
+    async fn prepare_tools(&self) -> Result<Vec<ToolSchema>> {
+        Ok(self.tools.clone())
+    }
+
+    async fn create_prompt(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_model_response(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn process_response(&self) -> Result<()> {
         Ok(())
     }
 
@@ -140,8 +256,7 @@ impl WebAgent {
         cancellation_token: Option<CancellationToken>,  // 支持异步操作的取消功能
     ) -> Result<String> {
         // 确保浏览器上下文已准备好，保证仅有一个FunctionCall（为了一次执行一个动作）
-        let _driver = self.driver()
-            .map_err(|e| anyhow::anyhow!("Browser context is not initialized: {}", e))?;
+        let _ = self.chrome_ctrl.as_ref().unwrap()._wait_for_page_ready();
 
         if messages.len() != 1 {
             return Err(anyhow::anyhow!("Expected exactly one function call"));

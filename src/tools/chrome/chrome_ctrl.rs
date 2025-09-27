@@ -13,6 +13,7 @@ use crate::tools::chrome::types::{InteractiveRegion, VisualViewport, PageMetadat
 use std::collections::HashMap;
 
 /// Chrome 浏览器控制器
+#[derive(Debug)]
 pub struct Chrome {
     driver: Arc<WebDriver>,
     anim_utils: AnimationUtils,
@@ -309,7 +310,7 @@ impl Chrome {
 
     /// 页面信息获取
     // 截图信息
-    async fn _get_screenshot(&self, path: Option<&str>) -> WebDriverResult<Vec<u8>> {
+    pub async fn _get_screenshot(&self, path: Option<&str>) -> WebDriverResult<Vec<u8>> {
         let png_data = self.driver.screenshot_as_png().await?;
         if let Some(path_str) = path {
             let path = Path::new(path_str);
@@ -322,7 +323,7 @@ impl Chrome {
     }
 
     // 扫描页面并返回所有可交互元素的位置，大小和类型信息，这些元素会被注入一个唯一的__elementId,以便后续操作
-    async fn _get_interactive_rects(&self) -> Result<HashMap<String,InteractiveRegion>, WebDriverError> {
+    pub async fn _get_interactive_rects(&self) -> Result<HashMap<String,InteractiveRegion>, WebDriverError> {
 
         let init_script = include_str!("page_script.js");
         self.driver
