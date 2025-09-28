@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
+use anyhow::Result;
 use thirtyfour::prelude::*;
 
 #[derive(Debug)]
@@ -15,12 +16,12 @@ impl AnimationUtils {
     }
 
     /// 获取上次光标位置
-    pub fn _last_position(&self) -> (f64, f64) {
+    pub fn last_position(&self) -> (f64, f64) {
         self.last_cursor_position
     }
 
     /// 高亮元素 + 创建自定义光标
-    pub async fn _add_cursor_box(&self, tab: &Arc<WebDriver>, identifier: &str) -> Result<(), WebDriverError> {
+    pub async fn add_cursor_box(&self, tab: &Arc<WebDriver>, identifier: &str) -> Result<()> {
         let js_code = format!(
             r#"
             const elm = document.querySelector(`[__elementId='{}']`);
@@ -52,7 +53,7 @@ impl AnimationUtils {
     }
 
     /// 从 (start_x, start_y) 平滑移动到 (end_x, end_y)
-    pub async fn _gradual_cursor_animation(
+    pub async fn gradual_cursor_animation(
         &mut self,
         tab: &Arc<WebDriver>,
         start_x: f64,
@@ -61,9 +62,9 @@ impl AnimationUtils {
         end_y: f64,
         steps: usize,
         step_delay_ms: u64,
-    ) -> Result<(), WebDriverError> {
+    ) -> Result<()> {
         // 确保光标存在
-        self._add_cursor_box(tab, "cursor").await?;
+        self.add_cursor_box(tab, "cursor").await?;
 
         for step in 0..steps {
             let ratio = step as f64 / steps as f64;
@@ -100,7 +101,7 @@ impl AnimationUtils {
     }
 
     /// 移除高亮和光标
-    pub async fn _remove_cursor_box(&self, tab: &Arc<WebDriver>, identifier: &str) -> Result<(), WebDriverError> {
+    pub async fn remove_cursor_box(&self, tab: &Arc<WebDriver>, identifier: &str) -> Result<()> {
         let js_code = format!(
             r#"
             const elm = document.querySelector(`[__elementId='{}']`);
@@ -120,7 +121,7 @@ impl AnimationUtils {
     }
 
     /// 清理所有动画效果
-    pub async fn _cleanup_animations(&mut self, tab: &Arc<WebDriver>) -> Result<(), WebDriverError> {
+    pub async fn cleanup_animations(&mut self, tab: &Arc<WebDriver>) -> Result<()> {
         let js_code = r#"
             const cursor = document.getElementById('red-cursor');
             if (cursor) {

@@ -1,26 +1,8 @@
 use std::collections::HashMap;
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use thiserror::Error;
 
-
-#[derive(Error, Debug)]
-pub enum GetValueError {
-    #[error("键 '{0}' 未找到")]
-    KeyNotFound(String),
-    #[error("键 '{0}' 的类型不匹配，期望 {1}，实际 {2}")]
-    TypeMismatch(String, String, String),
-    #[error("键 '{0}' 包含无效数字")]
-    InValidNumber(String),
-}
-
-#[derive(Error, Debug)]
-pub enum MetadataError {
-    #[error("解析JSON解析失败: {0}")]
-    JsonLdParseError(String),
-    #[error("类型不匹配：{0}")]
-    TypeMismatch(String),
-}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DOMRectangle{
@@ -109,34 +91,30 @@ pub struct PageMetadata {
 
 
 /// 从JSON值中获取数字字段
-fn get_number(value: &HashMap<String, Value>, key: &str) -> Result<f64, GetValueError> {
+fn get_number(value: &HashMap<String, Value>, key: &str) -> Result<f64> {
     let val = value.get(key)
-        .ok_or_else(|| GetValueError::KeyNotFound(key.to_string()))?;
+        .ok_or_else(|| anyhow!("Missing key '{}' in viewport data", key))?;
 
     match val {
         Value::Number(num) => {
             num.as_f64()
-                .ok_or_else(||GetValueError::InValidNumber(key.to_string()))
+                .ok_or_else(|| anyhow!("Value for key '{}' is not a valid f64 number", key))
         }
         Value::String(s) => {
             s.parse::<f64>()
-                .map_err(|_| GetValueError::TypeMismatch(
-                    key.to_string(),
-                    "数字".to_string(),
-                    format!("字符串 '{}'",s),
-                ))
+                .map_err(|_| anyhow!("Value for key '{}' is not a valid f64 number", key))
         }
-        _ => Err(GetValueError::TypeMismatch(
-            key.to_string(),
-            "数字".to_string(),
-            format!("{:?}",val),
+        _ => Err(anyhow!(
+            "Key '{}' has invalid type: expected number or numeric string, got {:?}",
+            key,
+            val
         ))
     }
 }
 
 impl VisualViewport {
     /// Json格式转化为VisualViewport实例
-    pub fn visualviewport_from_dict(viewport: &HashMap<String, Value>) -> Result<VisualViewport, GetValueError> {
+    pub fn visualviewport_from_dict(viewport: &HashMap<String, Value>) -> Result<VisualViewport> {
         Ok(Self {
             height: get_number(viewport, "height")?,
             width: get_number(viewport, "width")?,

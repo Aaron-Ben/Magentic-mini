@@ -1,8 +1,6 @@
 use std::fmt::{Debug};
 use std::io::Write;
-use std::error::Error;
-use anyhow::anyhow;
-use std::fmt;
+use anyhow::{anyhow, Context, Result};
 use pdf_extract::extract_text;
 use std::sync::Arc;
 use tiktoken_rs::{
@@ -11,122 +9,12 @@ use tiktoken_rs::{
     // 导入库内置的编码方案创建函数（对应 Tokenizer 枚举的每个变体）
     cl100k_base, o200k_base, p50k_base, r50k_base, p50k_edit,
 };
-use pdf_extract::OutputError;
 use reqwest::Client;
 use tempfile::NamedTempFile;
 use thirtyfour::prelude::*;
 use serde_json::Value;
 use tokio::time::Duration;
 use crate::tools::utils::markitdown_bridge::convert_html_to_markdown_with_markitdown;
-
-#[derive(Debug)]
-pub enum WebpageTextError {
-    /// WebDriver 相关错误（如元素查找失败、JS执行错误等）
-    WebDriver(WebDriverError),
-    /// HTTP 请求错误（如下载PDF失败）
-    Http(reqwest::Error),
-    /// PDF 文本提取错误（如解析PDF失败）
-    PdfExtract(pdf_extract::Error),
-    /// IO 操作错误（如临时文件创建/写入失败）
-    Io(std::io::Error),
-    /// 分词器相关错误（如tiktoken初始化/编码失败）
-    Tiktoken(anyhow::Error),
-    /// JSON 解析错误（如JS返回值解析失败）
-    SerdeJson(serde_json::Error),
-    /// 存储文本提取错误
-    ExtractText(OutputError),
-    /// HTML 处理失败
-    Html(String),
-    /// 自定义业务逻辑错误（如JS返回非预期类型、内容无效等）
-    Custom(String),
-}
-
-impl fmt::Display for WebpageTextError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            WebpageTextError::WebDriver(e) => write!(f, "WebDriver操作失败: {}", e),
-            WebpageTextError::Http(e) => write!(f, "HTTP请求失败: {}", e),
-            WebpageTextError::PdfExtract(e) => write!(f, "PDF文本提取失败: {}", e),
-            WebpageTextError::Io(e) => write!(f, "IO操作失败: {}", e),
-            WebpageTextError::Tiktoken(e) => write!(f, "分词器操作失败: {}", e),
-            WebpageTextError::SerdeJson(e) => write!(f, "JSON解析失败: {}", e),
-            WebpageTextError::ExtractText(e) => write!(f, "文本提取错误: {}",e),
-            WebpageTextError::Html(e) => write!(f,"html提取错误: {}",e),
-            WebpageTextError::Custom(msg) => write!(f, "业务逻辑错误: {}", msg),
-        }
-    }
-}
-
-impl Error for WebpageTextError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            WebpageTextError::WebDriver(e) => Some(e),
-            WebpageTextError::Http(e) => Some(e),
-            WebpageTextError::PdfExtract(e) => Some(e),
-            WebpageTextError::Io(e) => Some(e),
-            WebpageTextError::Tiktoken(e) => Some(e.as_ref()),
-            WebpageTextError::SerdeJson(e) => Some(e),
-            WebpageTextError::ExtractText(e) => Some(e),
-            WebpageTextError::Html(_) => None,
-            WebpageTextError::Custom(_) => None, // 自定义错误无底层来源
-        }
-    }
-}
-
-impl From<WebDriverError> for WebpageTextError {
-    fn from(e: WebDriverError) -> Self {
-        WebpageTextError::WebDriver(e)
-    }
-}
-
-// 从 reqwest::Error 转换为 WebpageTextError
-impl From<reqwest::Error> for WebpageTextError {
-    fn from(e: reqwest::Error) -> Self {
-        WebpageTextError::Http(e)
-    }
-}
-
-// 从 pdf_extract::Error 转换为 WebpageTextError
-impl From<pdf_extract::Error> for WebpageTextError {
-    fn from(e: pdf_extract::Error) -> Self {
-        WebpageTextError::PdfExtract(e)
-    }
-}
-
-// 从 std::io::Error 转换为 WebpageTextError
-impl From<std::io::Error> for WebpageTextError {
-    fn from(e: std::io::Error) -> Self {
-        WebpageTextError::Io(e)
-    }
-}
-
-// 从 tiktoken_rs::Error 转换为 WebpageTextError
-// tiktoken_rs 中使用的是anyhow::Error
-impl From<anyhow::Error> for WebpageTextError {
-    fn from(e: anyhow::Error) -> Self {
-        WebpageTextError::Tiktoken(e)
-    }
-}
-
-// 从 serde_json::Error 转换为 WebpageTextError
-impl From<serde_json::Error> for WebpageTextError {
-    fn from(e: serde_json::Error) -> Self {
-        WebpageTextError::SerdeJson(e)
-    }
-}
-
-// 从 output::Error 转换为 WebpageTextError
-impl From<OutputError> for WebpageTextError {
-    fn from(e: OutputError) -> Self {
-        WebpageTextError::ExtractText(e)
-    }
-}
-
-impl From<String> for WebpageTextError {
-    fn from(e: String) -> Self {
-        WebpageTextError::Html(e)
-    }
-}
 
 #[derive(Debug,Clone)]
 pub struct WebpageTextUtils {
@@ -138,10 +26,9 @@ impl WebpageTextUtils {
         Self { driver }
     }
 
-    pub async fn _get_all_webpage_text(&self, n_lines: Option<usize>) -> Result<String,WebpageTextError> {
+    pub async fn get_all_webpage_text(&self, n_lines: Option<usize>) -> Result<String> {
         let n_lines = n_lines.unwrap_or(50);
 
-        // 查找body元素：WebDriverError 自动转换为 WebpageTextError
         let body_element = self.driver.find(By::Tag("body")).await?;
         
         // 获取文本：错误自动转换
@@ -162,7 +49,7 @@ impl WebpageTextUtils {
         Ok(non_empty_lines.join("\n"))
     }
 
-    async fn _is_pdf_page(&self) -> Result<bool,WebpageTextError> {
+    async fn is_pdf_page(&self) -> Result<bool> {
         let url = self.driver.current_url().await?;
         if url.to_string().to_lowercase().ends_with(".pdf") {
             return Ok(true);
@@ -185,39 +72,35 @@ impl WebpageTextUtils {
 
         let value: Value = result.json().clone();
 
-        let is_pdf = value.as_bool().ok_or_else(|| {
-            WebpageTextError::Custom(format!(
-                "判断PDF页面失败：JavaScript返回非布尔值，实际值为 {:?}", 
-                value
-            ))
-        })?;
+        let is_pdf = value.as_bool()
+        .ok_or_else(|| anyhow!("JavaScript returned non-boolean value for is_pdf_page"))?;
         Ok(is_pdf)
     }
 
     // 网页处理工具：网页（PDF界面）转化为Markdown
-    pub async fn _get_page_markdown(&self, max_tokens: i32) -> Result<String,WebpageTextError> {
+    pub async fn get_page_markdown(&self, max_tokens: i32) -> Result<String> {
         self.driver
             .set_implicit_wait_timeout(Duration::from_secs(10))
             .await?;
 
-        if self._is_pdf_page().await? {
-            return self._extract_pdf_content().await;
+        if self.is_pdf_page().await? {
+            return self.extract_pdf_content().await;
         }
 
-        let html = self._get_clean_html().await?;
+        let html = self.get_clean_html().await?;
 
         let markdown = convert_html_to_markdown_with_markitdown(&html)
         .await
-        .map_err(|e| WebpageTextError::Custom(format!("markitdown 转换失败: {}", e)))?;
+        .map_err(|e| anyhow!("markitdown 转换失败: {}", e))?;
 
         if max_tokens > 0 {
-            self._limit_token(&markdown, max_tokens as usize)
+            self.limit_token(&markdown, max_tokens as usize)
         } else {
             Ok(markdown)
         }
     }
 
-    async fn _get_clean_html(&self) -> Result<String,WebpageTextError> {
+    async fn get_clean_html(&self) -> Result<String> {
         let script = r#"
             // 创建文档副本，避免修改原始DOM
             const cleanDoc = document.cloneNode(true);
@@ -263,19 +146,19 @@ impl WebpageTextUtils {
             .driver
             .execute(script, vec![])
             .await
-            .map_err(WebpageTextError::WebDriver)?;
+            .context("Failed to execute script to get clean HTML")?;
     
         let html = result
             .json()
             .as_str()
-            .ok_or_else(|| WebpageTextError::Html("无法解析清理后的 HTML".into()))?
+            .ok_or_else(|| anyhow!("Failed to get HTML from script result"))?
             .to_string();
     
         Ok(html)
     }
     
     // Tokenizen 枚举 --> CoreBPE 实例
-    fn _tokenizer_to_core_bpe(tokenizer: Tokenizer) -> Result<CoreBPE,anyhow::Error> {
+    fn tokenizer_to_core_bpe(tokenizer: Tokenizer) -> Result<CoreBPE> {
         match tokenizer {
             Tokenizer::O200kBase => o200k_base(),    // 对应 O200kBase 编码方案
             Tokenizer::Cl100kBase => cl100k_base(),  // 对应 Cl100kBase 编码方案（GPT-4/3.5 用）
@@ -287,7 +170,7 @@ impl WebpageTextUtils {
     }
 
     // 限制tokn数量
-    fn _limit_token(&self, content: &str, max_tokens: usize) -> Result<String, WebpageTextError>{
+    fn limit_token(&self, content: &str, max_tokens: usize) -> Result<String>{
         if content.is_empty() {
             return Ok(String::new())
         }
@@ -296,7 +179,7 @@ impl WebpageTextUtils {
         let tokenizer_type = get_tokenizer(model).unwrap();
 
         // Tokenizer 枚举转为真正的 CoreBPE 实例
-        let bpe = Self::_tokenizer_to_core_bpe(tokenizer_type)?;
+        let bpe = Self::tokenizer_to_core_bpe(tokenizer_type)?;
 
         let tokens = bpe.encode_with_special_tokens(content);
         let limited_tokens = if tokens.len() > max_tokens {
@@ -308,17 +191,17 @@ impl WebpageTextUtils {
         // 步骤5：解码 Token 为文本（使用 CoreBPE 源码中的 decode 方法，自动验证 UTF-8）
         let limited_content = bpe
             .decode(limited_tokens)
-            .map_err(|e| WebpageTextError::Tiktoken(anyhow!("Token解码失败：{}", e)))?;
+            .map_err(|e| anyhow!("Token解码失败：{}", e))?;
 
         Ok(limited_content)
     }
 
     // 从pdf 提取文本（高级实现，更好的错误处理）
-    async fn _extract_pdf_content(&self) -> Result<String,WebpageTextError> {
+    async fn extract_pdf_content(&self) -> Result<String> {
         let url = self.driver.current_url().await?;
         
 
-        let browser_text = self._extract_pdf_browser().await?;
+        let browser_text = self.extract_pdf_browser().await?;
         if !browser_text.is_empty() && browser_text.len() > 100 {
             return Ok(browser_text)
         }
@@ -342,9 +225,7 @@ impl WebpageTextUtils {
 
         // 检查提取结果是否有效
         if text_content.is_empty() {
-            return Err(WebpageTextError::Custom(
-                "PDF文本提取失败：提取结果为空字符串（可能是加密PDF或无效格式）".to_string()
-            ));
+            return Err(anyhow!("PDF文本提取失败：提取结果为空字符串（可能是加密PDF或无效格式）"));
         }
         
         Ok(text_content)
@@ -352,7 +233,7 @@ impl WebpageTextUtils {
     }
 
     // 从 pdf 提取文本（底层封装）
-    async fn _extract_pdf_browser(&self) -> Result<String,WebpageTextError> {
+    async fn extract_pdf_browser(&self) -> Result<String> {
         let script = r#"
             // For PDF.js viewer
             if (window.PDFViewerApplication) {

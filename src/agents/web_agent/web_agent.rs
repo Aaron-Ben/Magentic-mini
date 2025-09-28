@@ -1,7 +1,10 @@
 use std::collections::HashMap;
+use std::fmt::Debug;
+use std::sync::Arc;
 
-use thirtyfour::prelude::*;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Ok, Result};
+use serde_json::Value;
+use tldextract::{TldExtractor, TldOption};
 use crate::agents::web_agent::prompt::WEB_SURFER_SYSTEM_MESSAGE;
 use crate::agents::web_agent::set_of_mark::{PageState, _add_set_of_mark};
 use crate::agents::web_agent::tool_define::DefaultTools;
@@ -9,7 +12,8 @@ use crate::agents::web_agent::types::FunctionCall;
 use crate::tools::chrome::chrome_ctrl::Chrome;
 use crate::tools::chrome::types::InteractiveRegion;
 use crate::tools::tool_metadata::ToolSchema;
-use crate::types::message::{CancellationToken, LLMMessage, SystemMessage};
+use crate::tools::url_status_manager::{UrlStatus, UrlStatusManager};
+use crate::types::message::{CancellationToken, LLMMessage, SystemMessage, TextMessage};
 
 
 pub enum LLMResponse {
@@ -18,16 +22,26 @@ pub enum LLMResponse {
     Error(String),
 }
 
+#[async_trait::async_trait]
+pub trait ActionGuard: Send + Sync + Debug{
+    async fn get_approval(&self, request_msg: TextMessage) -> bool;
+}
+
 #[derive(Debug)]
 pub struct WebAgent {
     chrome_ctrl: Option<Chrome>,
     chat_history: Option<Vec<LLMMessage>>,
     tools: Vec<ToolSchema>,
+
+    url_status_manager: UrlStatusManager,
+    last_rejected_url: Option<String>,
+    action_guard: Option<Arc<dyn ActionGuard>>,     // 安全在多线程环境中使用，指出任意实现 ActionGuard trait 的类型
+    name: String,
 }
 
 impl Default for WebAgent {
-    fn default() -> Self {
 
+    fn default() -> Self {
         let default_tools = DefaultTools::new()
         .expect("Failed to load default tools");
 
@@ -62,8 +76,13 @@ impl Default for WebAgent {
             chrome_ctrl: None,
             chat_history: None,
             tools,
+            url_status_manager: UrlStatusManager::new(None, None),
+            last_rejected_url: None,
+            action_guard: None,
+            name: "WebAgent".to_string(),
         }
     }
+
 }
 
 impl WebAgent {
@@ -71,7 +90,7 @@ impl WebAgent {
         Self::default()
     }
 
-    pub async fn initialize(&mut self) -> Result<(), WebDriverError> {
+    pub async fn initialize(&mut self) -> Result<()> {
         self.chrome_ctrl = Some(Chrome::new().await?);
         self.chat_history = Some(Vec::new());
         Ok(())
@@ -157,8 +176,8 @@ impl WebAgent {
     {
 
         // 1. 确保页面可用性
-        self.chrome_ctrl.as_ref().unwrap()._wait_for_page_ready().await?;
-        self.chrome_ctrl.as_ref().unwrap()._get_interactive_rects().await?;
+        self.chrome_ctrl.as_ref().unwrap().wait_for_page_ready().await?;
+        self.chrome_ctrl.as_ref().unwrap().get_interactive_rects().await?;
 
         // 2. 准备聊天历史
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
@@ -224,8 +243,8 @@ impl WebAgent {
     }
 
     async fn get_page_state_and_elements(&self) -> Result<PageState> {
-        let rects = self.chrome_ctrl.as_ref().unwrap()._get_interactive_rects().await?;
-        let screenshot = self.chrome_ctrl.as_ref().unwrap()._get_screenshot(None).await?;
+        let rects = self.chrome_ctrl.as_ref().unwrap().get_interactive_rects().await?;
+        let screenshot = self.chrome_ctrl.as_ref().unwrap().get_screenshot(None).await?;
         let result = _add_set_of_mark(&screenshot, &rects, true)?;
         Ok(result)
     }
@@ -246,9 +265,79 @@ impl WebAgent {
         Ok(())
     }
 
+    pub async fn check_url_and_generate_msg(&mut self, url: String) -> Result<(String,bool)> {
+        // 特殊处理 chrome-error界面
+        if url == "chrome-error://chromewebdata/" {
+            if let Some(last_rejected) = self.last_rejected_url.take() {
+                let msg = format!(
+                    "I am not allowed to visit the website {} because it is not in the list of websites I can access and the use has declined to approve it.",
+                    last_rejected
+                );
+                return Ok((msg, false));
+            }
+        }
+        // 检查是否被blocked
+        if self.url_status_manager.is_url_blocked(&url) {
+            let msg = format!(
+                "I am not allowed to visit the website {} because it has been blocked.",
+                url
+            );
+            return Ok((msg, false));
+        }
+        // 检查是否允许
+        if !self.url_status_manager.is_url_allowed(&url) {
+            if !self.url_status_manager.is_url_rejected(&url) {
+                // 提取域名（fqdn）
+                let domain = {
+                    // 使用临时 extractor（或可缓存到 WebAgent）
+                    let extractor = TldExtractor::new(TldOption::default());
+                    let extracted = extractor.extract(&url).unwrap_or_else(|_| {
+                        tldextract::TldResult { domain: None, subdomain: None, suffix: None }
+                    });
+                    match (&extracted.domain, &extracted.suffix) {
+                        (Some(domain), Some(suffix)) => format!("{}.{}", domain, suffix),
+                        (Some(domain), None) => domain.clone(),
+                        _ => String::new(),
+                    }
+                };
+                let domain = if domain.is_empty() { url.clone() } else { domain };
 
-    pub async fn _executor_tool(
-        &self,
+                let approved = if let Some(guard) = &self.action_guard {
+                    let request_msg = TextMessage {
+                        source: self.name.clone(),
+                        content: format!(
+                            "The website {} is not allowed. Would you like to allow the domain {} for this session?",
+                            url, domain
+                        ),
+                        metadata: HashMap::new(),
+                    };
+                    guard.get_approval(request_msg).await
+                } else {
+                    false
+                };
+
+                if approved {
+                    self.url_status_manager.set_url_status(&domain, UrlStatus::Allowed);
+                    return Ok(("".to_string(), true));
+                } else {
+                    self.url_status_manager.set_url_status(&domain, UrlStatus::Rejected);
+                }
+            }
+
+            // 记录最后被拒绝的 URL
+            self.last_rejected_url = Some(url.clone());
+            let msg = format!(
+                "I am not allowed to visit the website {} because it is not in the list of websites I can access and the user has declined to allow it.",
+                url
+            );
+            return Ok((msg, false));
+        }
+
+        Ok(("".to_string(),true)) 
+    }
+
+    pub async fn executor_tool(
+        &mut self,
         messages: Vec<FunctionCall>,                    // 提取工具的名称
         rects: HashMap<String, InteractiveRegion>,      // 主要传递给需要与页面元素交互的工具
         tools: Vec<ToolSchema>,                         // 工具列表
@@ -256,7 +345,7 @@ impl WebAgent {
         cancellation_token: Option<CancellationToken>,  // 支持异步操作的取消功能
     ) -> Result<String> {
         // 确保浏览器上下文已准备好，保证仅有一个FunctionCall（为了一次执行一个动作）
-        let _ = self.chrome_ctrl.as_ref().unwrap()._wait_for_page_ready();
+        let _ = self.chrome_ctrl.as_ref().unwrap().wait_for_page_ready();
 
         if messages.len() != 1 {
             return Err(anyhow::anyhow!("Expected exactly one function call"));
@@ -286,19 +375,15 @@ impl WebAgent {
 
         // 根据工具名称执行对应的工具函数
         let action_description = match name.as_str() {
-            "click" => self._execute_tool_click(args, &rects, &element_id_mapping).await?,
-            "input_text" => self._execute_tool_input_text(args, &rects, &element_id_mapping).await?,
-            "hover" => self._execute_tool_hover(args, &rects, &element_id_mapping).await?,
-            "select_option" => self._execute_tool_select_option(args, &rects, &element_id_mapping).await?,
-            "upload_file" => self._execute_tool_upload_file(args, &rects, &element_id_mapping).await?,
-            "click_full" => self._execute_tool_click_full(args, &rects, &element_id_mapping).await?,
-            "answer_question" => self._execute_tool_answer_question(args, cancellation_token).await?,
-            "summarize_page" => self._execute_tool_summarize_page(args, cancellation_token).await?,
-            "visit_url" => self._execute_tool_visit_url(args).await?,
-            "press" => self._execute_tool_press(args).await?,
-            "scroll" => self._execute_tool_scroll(args).await?,
-            "screenshot" => self._execute_tool_screenshot().await?,
-            "get_page_content" => self._execute_tool_get_page_content().await?,
+            "click" => self.execute_tool_click(args, &rects, &element_id_mapping).await?,
+            "input_text" => self.execute_tool_input_text(args, &rects, &element_id_mapping).await?,
+            "hover" => self.execute_tool_hover(args, &rects, &element_id_mapping).await?,
+            "select_option" => self.execute_tool_select_option(args, &rects, &element_id_mapping).await?,
+            "upload_file" => self.execute_tool_upload_file(args, &rects, &element_id_mapping).await?,
+            "click_full" => self.execute_tool_click_full(args, &rects, &element_id_mapping).await?,
+            "answer_question" => self.execute_tool_answer_question(args, cancellation_token).await?,
+            "summarize_page" => self.execute_tool_summarize_page(args, cancellation_token).await?,
+            "visit_url" => self.execute_tool_visit_url(args).await?,
             _ => {
                 return Err(anyhow::anyhow!("Tool '{}' is not implemented yet", name));
             }
@@ -318,8 +403,79 @@ impl WebAgent {
         Ok(action_description)
     }
 
-    // 具体的工具执行函数
-    async fn _execute_tool_click(
+    // 终止Agent执行，并返回最终的答案
+    pub async fn execute_tool_stop_action(&mut self, args: String) -> Result<String> {
+        Ok(args)
+    }
+
+    async fn execute_tool_visit_url(&mut self, args: Value) -> Result<String> {
+
+        let url = args
+            .get("url")
+            .and_then(|v|v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("URL is required"))?;
+
+        let (ret, approved) = self.check_url_and_generate_msg(url.to_string()).await?;
+        if !approved {
+            return Ok(ret);
+        }
+
+        let action_description = format!("I type '{}' into the browser address bar.", url);
+
+        if url.starts_with("https://") || url.starts_with("http://") || url.starts_with("file://") || url.starts_with("about:") {
+            self.chrome_ctrl.as_ref().unwrap().visit_page(url).await?;
+        } else if url.contains(" ") {
+            let (ret, approved) = self.check_url_and_generate_msg("bing.com".to_string()).await?;
+            if !approved {
+                return Ok(ret);
+            }
+            let search_url = format!("https://www.bing.com/search?q={}", url);
+            self.chrome_ctrl.as_ref().unwrap().visit_page(&search_url).await?;
+        } else {
+            let full_url = format!("https://{}", url);
+            self.chrome_ctrl.as_ref().unwrap().visit_page(&full_url).await?;
+        }
+
+        // 4. 更新状态
+        // if reset_last_download {
+        //     self.last_download = None;
+        // }
+        // if reset_prior_metadata {
+        //     self.prior_metadata_hash = None;
+        // }
+
+        Ok(action_description)
+    }
+
+    async fn execute_tool_history_back(&self) -> Result<String> {
+        Ok("History back action executed".to_string())
+    }
+
+    async fn execute_tool_refresh_page(&self) -> Result<String> {
+        Ok("Refresh page action executed".to_string())
+    }
+
+    async fn execute_tool_web_search(&self) -> Result<String> {
+        Ok("Web search action executed".to_string())
+    }
+
+    async fn execute_tool_page_up(&self) -> Result<String> {
+        Ok("Page up action executed".to_string())
+    }
+
+    async fn execute_tool_page_down(&self) -> Result<String> {
+        Ok("Page down action executed".to_string())
+    }
+
+    async fn execute_tool_scroll_down(&self) -> Result<String> {
+        Ok("Scroll down action executed".to_string())
+    }
+
+    async fn execute_tool_scroll_up(&self) -> Result<String> {
+        Ok("Scroll up action executed".to_string())
+    }
+
+    async fn execute_tool_click(
         &self,
         _args: serde_json::Value,
         _rects: &HashMap<String, InteractiveRegion>,
@@ -329,47 +485,7 @@ impl WebAgent {
         Ok("Click action executed".to_string())
     }
 
-    async fn _execute_tool_input_text(
-        &self,
-        _args: serde_json::Value,
-        _rects: &HashMap<String, InteractiveRegion>,
-        _element_id_mapping: &HashMap<String, String>,
-    ) -> Result<String> {
-        // TODO: 实现文本输入功能
-        Ok("Input text action executed".to_string())
-    }
-
-    async fn _execute_tool_hover(
-        &self,
-        _args: serde_json::Value,
-        _rects: &HashMap<String, InteractiveRegion>,
-        _element_id_mapping: &HashMap<String, String>,
-    ) -> Result<String> {
-        // TODO: 实现悬停功能
-        Ok("Hover action executed".to_string())
-    }
-
-    async fn _execute_tool_select_option(
-        &self,
-        _args: serde_json::Value,
-        _rects: &HashMap<String, InteractiveRegion>,
-        _element_id_mapping: &HashMap<String, String>,
-    ) -> Result<String> {
-        // TODO: 实现选择选项功能
-        Ok("Select option action executed".to_string())
-    }
-
-    async fn _execute_tool_upload_file(
-        &self,
-        _args: serde_json::Value,
-        _rects: &HashMap<String, InteractiveRegion>,
-        _element_id_mapping: &HashMap<String, String>,
-    ) -> Result<String> {
-        // TODO: 实现文件上传功能
-        Ok("Upload file action executed".to_string())
-    }
-
-    async fn _execute_tool_click_full(
+    async fn execute_tool_click_full(
         &self,
         _args: serde_json::Value,
         _rects: &HashMap<String, InteractiveRegion>,
@@ -379,7 +495,17 @@ impl WebAgent {
         Ok("Click full action executed".to_string())
     }
 
-    async fn _execute_tool_answer_question(
+    async fn execute_tool_input_text(
+        &self,
+        _args: serde_json::Value,
+        _rects: &HashMap<String, InteractiveRegion>,
+        _element_id_mapping: &HashMap<String, String>,
+    ) -> Result<String> {
+        // TODO: 实现文本输入功能
+        Ok("Input text action executed".to_string())
+    }
+
+    async fn execute_tool_answer_question(
         &self,
         _args: serde_json::Value,
         _cancellation_token: Option<CancellationToken>,
@@ -388,7 +514,7 @@ impl WebAgent {
         Ok("Answer question action executed".to_string())
     }
 
-    async fn _execute_tool_summarize_page(
+    async fn execute_tool_summarize_page(
         &self,
         _args: serde_json::Value,
         _cancellation_token: Option<CancellationToken>,
@@ -397,31 +523,56 @@ impl WebAgent {
         Ok("Summarize page action executed".to_string())
     }
 
-    async fn _execute_tool_visit_url(&self, _args: serde_json::Value) -> Result<String> {
-        // TODO: 实现访问URL功能
-        Ok("Visit URL action executed".to_string())
+    async fn execute_tool_hover(
+        &self,
+        _args: serde_json::Value,
+        _rects: &HashMap<String, InteractiveRegion>,
+        _element_id_mapping: &HashMap<String, String>,
+    ) -> Result<String> {
+        // TODO: 实现悬停功能
+        Ok("Hover action executed".to_string())
     }
 
-    async fn _execute_tool_press(&self, _args: serde_json::Value) -> Result<String> {
+
+    async fn execute_tool_sleep(&self, _args: serde_json::Value) -> Result<String> {
+        Ok("Sleep action executed".to_string())
+    }
+
+    async fn execute_tool_select_option(
+        &self,
+        _args: serde_json::Value,
+        _rects: &HashMap<String, InteractiveRegion>,
+        _element_id_mapping: &HashMap<String, String>,
+    ) -> Result<String> {
+        // TODO: 实现选择选项功能
+        Ok("Select option action executed".to_string())
+    }
+
+    async fn execute_tool_create_tab(&self, _args: serde_json::Value) -> Result<String> {
+        Ok("Create tab action executed".to_string())
+    }
+
+    async fn execute_tool_switch_tab(&self, _args: serde_json::Value) -> Result<String> {
+        Ok("Switch tab action executed".to_string())
+    }
+
+    async fn execute_tool_close_tab(&self, _args: serde_json::Value) -> Result<String> {
+        Ok("Close tab action executed".to_string())
+    }
+
+    async fn execute_tool_upload_file(
+        &self,
+        _args: serde_json::Value,
+        _rects: &HashMap<String, InteractiveRegion>,
+        _element_id_mapping: &HashMap<String, String>,
+    ) -> Result<String> {
+        // TODO: 实现文件上传功能
+        Ok("Upload file action executed".to_string())
+    }
+
+    async fn execute_tool_keypress(&self, _args: serde_json::Value) -> Result<String> {
         // TODO: 实现按键功能
         Ok("Press action executed".to_string())
     }
-
-    async fn _execute_tool_scroll(&self, _args: serde_json::Value) -> Result<String> {
-        // TODO: 实现滚动功能
-        Ok("Scroll action executed".to_string())
-    }
-
-    async fn _execute_tool_screenshot(&self) -> Result<String> {
-        // TODO: 实现截图功能
-        Ok("Screenshot action executed".to_string())
-    }
-
-    async fn _execute_tool_get_page_content(&self) -> Result<String> {
-        // TODO: 实现获取页面内容功能
-        Ok("Get page content action executed".to_string())
-    }
-
-
 
 }
