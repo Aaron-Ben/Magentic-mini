@@ -40,10 +40,10 @@ impl Chrome {
     }
 
     // 导航到指定的URL，而且智能处理下载文件，将下载的文件保存到指定的文件夹，并显示确认的页面
-    pub async fn visit_page(&self, url: &str) -> Result<()> {
+    pub async fn visit_page(&self, url: &str) -> Result<(bool,bool)> {
         // TODO
         self.driver.get(url).await?;
-        Ok(())
+        Ok((false,false))
     }
 
     pub async fn get_url(&self) -> Result<String> {
@@ -139,7 +139,7 @@ impl Chrome {
         Ok(())
     }
 
-    async fn go_back(&self) -> Result<()> {
+    pub async fn go_back(&self) -> Result<()> {
         self.driver.back().await?;
         Ok(())
     }
@@ -149,29 +149,32 @@ impl Chrome {
         Ok(())
     }
 
-    async fn refresh(&self) -> Result<()> {
+    pub async fn refresh(&self) -> Result<()> {
         self.driver.refresh().await?;
         Ok(())
     }
 
     /// 滚动管理
-    async fn page_up(&self) -> Result<()> {
+    pub async fn page_up(&self) -> Result<()> {
         self.driver.execute("window.scrollBy({ top: -window.innerHeight / 2, behavior: 'smooth' });", vec![]).await?;
         Ok(())
     }
 
-    async fn page_down(&self) -> Result<()> {
+    pub async fn page_down(&self) -> Result<()> {
         self.driver.execute("window.scrollBy({ top: window.innerHeight / 2, behavior: 'smooth' });", vec![]).await?;
         Ok(())
     }
 
-    async fn scroll_custom(&self, dir: &str, pixels: i32) -> Result<()> {
+    // 鼠标滚动(需要优化动画)
+    pub async fn scroll_mousewheel(&self, dir: &str, pixels: i32) -> Result<()> {
+        self.wait_for_page_ready().await?;
+        
         let scroll_amount = if dir == "up" { -pixels } else { pixels };
         self.driver.execute(&format!("window.scrollBy({{ top: {}, behavior: 'smooth' }});", scroll_amount), vec![]).await?;
         Ok(())
     }
 
-    async fn scroll_element(&self, element_id: &str, dir: &str, pixels: i32) -> Result<()> {
+    pub async fn scroll_element(&self, element_id: &str, dir: &str, pixels: i32) -> Result<()> {
         let scroll_amount = if dir == "up" { -pixels } else { pixels };
         let script = format!(
             r#"
@@ -494,7 +497,7 @@ impl Chrome {
     }
 
     // 网页内容转化为Markdown
-    async fn get_page_markdown(&self,max_tokens:usize) -> Result<String> {
+    pub async fn get_page_markdown(&self,max_tokens:usize) -> Result<String> {
         
         let markdown_utils = WebpageTextUtils::new(self.driver.clone());
         let markdown = markdown_utils
@@ -577,14 +580,66 @@ impl Chrome {
     pub async fn click_id(
         &mut self,
         identifier: &str,
-    ) -> Result<()> {
-        self.driver.execute(
-            &format!("document.querySelector('[__elementId=\"{}\"]').click();", identifier),
-            vec![]
-        ).await?;
+        hold: f64,
+        button: &str,       // "left" | "right"
+    ) -> Result<Option<PageInfo>> {
+
+        /*         
+        let selector = format!("[__elementId=\"{}\"]", identifier);
+
+        // 1. 等待元素可见（模拟 wait_for_selector）
+        self.wait_for_element_visible(&selector, self.timeout_load * 1000).await?;
+
+        // 2. 滚动到视图内
+        self.scroll_into_view(&selector).await?;
+
+        // 3. 获取元素边界框
+        let bbox = self.get_bounding_box(&selector).await?
+            .ok_or_else(|| anyhow::anyhow!("Element not visible: {}", identifier))?;
+        let center_x = bbox.x + bbox.width / 2.0;
+        let center_y = bbox.y + bbox.height / 2.0;
+
+        if self.single_tab_mode {
+            self.driver.execute(&format!(
+                r#"document.querySelector('{}').removeAttribute('target');
+                   document.querySelectorAll('a[target=_blank], form[target=_blank]')
+                          .forEach(e => e.removeAttribute('target')); "#,
+                selector
+            ), vec![]).await?;
+        }
 
 
-        unimplemented!();
+        let new_page = if self.single_tab_mode {
+            self.perform_click(center_x, center_y, hold, button).await?;
+            None
+        } else {
+            // 监听新页面（WebDriver 通常通过 window handles 实现）
+            let original_handles = self.get_window_handles().await?;
+            self.perform_click(center_x, center_y, hold, button).await?;
+
+            // 等待新窗口出现
+            let new_handles = timeout(
+                Duration::from_millis(self.timeout_load * 1000),
+                self.wait_for_new_window(&original_handles)
+            ).await;
+
+            match new_handles {
+                Ok(Some(new_handle)) => {
+                    self.switch_to_window(&new_handle).await?;
+                    let url = self.get_current_url().await?;
+                    Some(PageInfo { url })
+                }
+                _ => None,
+            }
+
+            if self.sleep_after_action > 0 {
+                sleep(Duration::from_secs(self.sleep_after_action)).await;
+            }
+
+
+        Ok(new_page)
+        */
+    
     }
 
     /// 将鼠标悬停在具有特定标识符的元素上

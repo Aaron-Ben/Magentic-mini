@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
-
-use anyhow::{anyhow, Ok, Result};
+use std::result::Result::Ok;
+use anyhow::{anyhow, Result};
 use serde_json::Value;
 use tldextract::{TldExtractor, TldOption};
 use crate::agents::web_agent::prompt::WEB_SURFER_SYSTEM_MESSAGE;
@@ -13,7 +13,7 @@ use crate::tools::chrome::chrome_ctrl::Chrome;
 use crate::tools::chrome::types::InteractiveRegion;
 use crate::tools::tool_metadata::ToolSchema;
 use crate::tools::url_status_manager::{UrlStatus, UrlStatusManager};
-use crate::types::message::{CancellationToken, LLMMessage, SystemMessage, TextMessage};
+use crate::types::message::{CancellationToken, LLMMessage, SystemMessage, TextMessage, UserMessage};
 
 
 pub enum LLMResponse {
@@ -410,6 +410,7 @@ impl WebAgent {
 
     async fn execute_tool_visit_url(&mut self, args: Value) -> Result<String> {
 
+        self.chrome_ctrl.as_ref().unwrap().wait_for_page_ready().await?;
         let url = args
             .get("url")
             .and_then(|v|v.as_str())
@@ -422,105 +423,266 @@ impl WebAgent {
 
         let action_description = format!("I type '{}' into the browser address bar.", url);
 
-        if url.starts_with("https://") || url.starts_with("http://") || url.starts_with("file://") || url.starts_with("about:") {
-            self.chrome_ctrl.as_ref().unwrap().visit_page(url).await?;
-        } else if url.contains(" ") {
-            let (ret, approved) = self.check_url_and_generate_msg("bing.com".to_string()).await?;
-            if !approved {
-                return Ok(ret);
-            }
-            let search_url = format!("https://www.bing.com/search?q={}", url);
-            self.chrome_ctrl.as_ref().unwrap().visit_page(&search_url).await?;
-        } else {
-            let full_url = format!("https://{}", url);
-            self.chrome_ctrl.as_ref().unwrap().visit_page(&full_url).await?;
-        }
+        let (reset_prior_metadata, reset_last_download) = 
+            if url.starts_with("https://") 
+                || url.starts_with("http://") 
+                || url.starts_with("file://") 
+                || url.starts_with("about:") 
+            {
+                self.chrome_ctrl.as_ref().unwrap().visit_page(url).await?
+            } else if url.contains(" ") {
+                let (ret, approved) = self.check_url_and_generate_msg("bing.com".to_string()).await?;
+                if !approved {
+                    return Ok(ret);
+                }
+                let search_url = format!("https://www.bing.com/search?q={}", url);
+                self.chrome_ctrl.as_ref().unwrap().visit_page(&search_url).await?
+            } else {
+                let full_url = format!("https://{}", url);
+                self.chrome_ctrl.as_ref().unwrap().visit_page(&full_url).await?
+            };
 
         // 4. 更新状态
-        // if reset_last_download {
-        //     self.last_download = None;
-        // }
-        // if reset_prior_metadata {
-        //     self.prior_metadata_hash = None;
-        // }
+        if reset_last_download {
+            // self.last_download = None;
+        }
+        if reset_prior_metadata {
+            // self.prior_metadata_hash = None;
+        }
 
         Ok(action_description)
     }
 
     async fn execute_tool_history_back(&self) -> Result<String> {
-        Ok("History back action executed".to_string())
+        self.chrome_ctrl.as_ref().unwrap().wait_for_page_ready().await?;
+        match self.chrome_ctrl.as_ref().unwrap().go_back().await {
+            Ok(()) => {
+                return Ok("I clicked the browser back button.".to_string())
+            }
+            Err(_) => {
+                return Ok("No previous page in the browser history or couldn't navigate back.".to_string())
+            }
+        }
     }
 
     async fn execute_tool_refresh_page(&self) -> Result<String> {
-        Ok("Refresh page action executed".to_string())
+        self.chrome_ctrl.as_ref().unwrap().wait_for_page_ready().await?;
+        self.chrome_ctrl.as_ref().unwrap().refresh().await?;
+        Ok("I refreshed the current page.".to_string())
     }
 
-    async fn execute_tool_web_search(&self) -> Result<String> {
-        Ok("Web search action executed".to_string())
+    async fn execute_tool_web_search(&mut self, args: serde_json::Value) -> Result<String> {
+
+        self.chrome_ctrl.as_ref().unwrap().wait_for_page_ready().await?;
+        let (ret, approved) = self.check_url_and_generate_msg("bing.com".to_string()).await?;
+
+        if !approved {
+            return Ok(ret);
+        }
+
+        let query = args.get("query").and_then(|v|v.as_str()).ok_or_else(|| anyhow::anyhow!("Query is required"))?;
+        let search_url = format!("https://www.bing.com/search?q={}&FORM=QBLH", query);
+        self.chrome_ctrl.as_ref().unwrap().visit_page(&search_url).await?;
+
+        let (reset_prior_metadata, reset_last_download) = self
+            .chrome_ctrl
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Chrome controller not initialized"))?
+            .visit_page(&search_url)
+            .await?;
+
+        if reset_last_download {
+            // self.last_download = None;
+        }
+
+        if reset_prior_metadata {
+            // self.prior_metadata_hash = None;
+        }
+
+        Ok(format!("I typed '{}' into the browser search bar.", query))
     }
 
     async fn execute_tool_page_up(&self) -> Result<String> {
-        Ok("Page up action executed".to_string())
+        self.chrome_ctrl.as_ref().unwrap().wait_for_page_ready().await?;
+        self.chrome_ctrl.as_ref().unwrap().page_up().await?;
+        Ok("I scrolled up one page in the browser".to_string())
     }
 
     async fn execute_tool_page_down(&self) -> Result<String> {
-        Ok("Page down action executed".to_string())
+        self.chrome_ctrl.as_ref().unwrap().wait_for_page_ready().await?;
+        self.chrome_ctrl.as_ref().unwrap().page_down().await?;
+        Ok("I scrolled down one page in the browser".to_string())
     }
 
-    async fn execute_tool_scroll_down(&self) -> Result<String> {
-        Ok("Scroll down action executed".to_string())
+    async fn execute_tool_scroll_down(&self, args: serde_json::Value) -> Result<String> {
+        self.chrome_ctrl.as_ref().unwrap().wait_for_page_ready().await?;
+        let pixels = args.get("pixels").and_then(|v|v.as_i64()).unwrap_or(400) as i32;
+        self.chrome_ctrl.as_ref().unwrap().scroll_mousewheel("down", pixels).await?;
+        Ok(format!("I scrolled down {} pixels in the browser.", pixels))
     }
 
-    async fn execute_tool_scroll_up(&self) -> Result<String> {
-        Ok("Scroll up action executed".to_string())
+    async fn execute_tool_scroll_up(&self, args: serde_json::Value) -> Result<String> {
+        self.chrome_ctrl.as_ref().unwrap().wait_for_page_ready().await?;
+        let pixels = args.get("pixels").and_then(|v|v.as_i64()).unwrap_or(400) as i32;
+        self.chrome_ctrl.as_ref().unwrap().scroll_mousewheel("up", pixels).await?;
+        Ok(format!("I scrolled up {} pixels in the browser.", pixels))
     }
 
     async fn execute_tool_click(
         &self,
-        _args: serde_json::Value,
-        _rects: &HashMap<String, InteractiveRegion>,
-        _element_id_mapping: &HashMap<String, String>,
+        args: serde_json::Value,
+        rects: &HashMap<String, InteractiveRegion>,
+        element_id_mapping: &HashMap<String, String>,
     ) -> Result<String> {
-        // TODO: 实现点击功能
-        Ok("Click action executed".to_string())
+        let target_id = args.get("target_id").and_then(|v|v.as_str()).unwrap_or("1");
+
+        let target_name = self.target_name(target_id, &rects);
+        let mapped_id = element_id_mapping
+            .get(target_id)
+            .ok_or_else(|| anyhow!("Target ID '{}' not found in mapping", target_id))?;
+
+        let action_description = if let Some(name) = target_name {
+            format!("I clicked '{}'.", name)
+        } else {
+            "I clicked the control.".to_string()
+        };
+
+        let new_page_info = self
+            .chrome_ctrl
+            .as_ref()
+            .ok_or_else(|| anyhow!("Chrome controller not initialized"))?
+            .click_id(mapped_id, 0.0, "left")
+            .await?;
+
+        if let Some(page_info) = new_page_info {
+            // self.prior_metadata_hash = None; // 重置元数据
+
+            let (ret, approved) = self
+                .check_url_and_generate_msg(page_info.url.clone())
+                .await?;
+            if !approved {
+                return Ok(ret);
+            }
+        }
+        
+        Ok(action_description)
     }
 
     async fn execute_tool_click_full(
         &self,
-        _args: serde_json::Value,
-        _rects: &HashMap<String, InteractiveRegion>,
-        _element_id_mapping: &HashMap<String, String>,
+        args: serde_json::Value,
+        rects: &HashMap<String, InteractiveRegion>,
+        element_id_mapping: &HashMap<String, String>,
     ) -> Result<String> {
-        // TODO: 实现完整点击功能
-        Ok("Click full action executed".to_string())
+        let target_id = args
+        .get("target_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("'target_id' is required"))?;
+
+        let target_name = self.target_name(target_id, &rects);
+        let mapped_id = element_id_mapping
+            .get(target_id)
+            .ok_or_else(|| anyhow!("Target ID '{}' not found in mapping", target_id))?;
+
+            let hold = args
+            .get("hold")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let button = args
+            .get("button")
+            .and_then(|v| v.as_str())
+            .unwrap_or("left");
+
+        let action_description = if let Some(name) = target_name {
+            format!(
+                "I clicked '{}' with button '{}' and hold {} seconds.",
+                name, button, hold
+            )
+        } else {
+            format!(
+                "I clicked the control with button '{}' and hold {} seconds.",
+                button, hold
+            )
+        };
+
+        let new_page_info = self
+            .chrome_ctrl
+            .as_ref()
+            .ok_or_else(|| anyhow!("Chrome controller not initialized"))?
+            .click_id(mapped_id, hold, button)
+            .await?;
+
+        if let Some(page_info) = new_page_info {
+            // self.prior_metadata_hash = None;
+
+            let (ret, approved) = self
+                .check_url_and_generate_msg(page_info.url.clone())
+                .await?;
+            if !approved {
+                return Ok(ret);
+            }
+        }
+
+        Ok(action_description)
     }
 
     async fn execute_tool_input_text(
-        &self,
-        _args: serde_json::Value,
-        _rects: &HashMap<String, InteractiveRegion>,
-        _element_id_mapping: &HashMap<String, String>,
+        &mut self,
+        args: serde_json::Value,
+        rects: &HashMap<String, InteractiveRegion>,
+        element_id_mapping: &HashMap<String, String>,
     ) -> Result<String> {
-        // TODO: 实现文本输入功能
-        Ok("Input text action executed".to_string())
+        let input_field_id = args
+            .get("input_field_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("'input_field_id' is required"))?;
+        let text_value = args
+            .get("text_value")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("'text_value' is required"))?;
+        let delete_existing_text = args
+            .get("delete_existing_text")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let press_enter = args
+            .get("press_enter")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let input_field_name = self.target_name(input_field_id, &rects);
+        let mapped_id = element_id_mapping
+            .get(input_field_id)
+            .ok_or_else(|| anyhow!("Input field ID '{}' not found in mapping", input_field_id))?;
+
+        let action_description = if let Some(name) = input_field_name {
+            format!("I typed '{}' into '{}'.", text_value, name)
+        } else {
+            format!("I typed '{}'.", text_value)
+        };
+
+        self.chrome_ctrl
+            .as_mut()
+            .ok_or_else(|| anyhow!("Chrome controller not initialized"))?
+            .fill_id(mapped_id, text_value, press_enter, delete_existing_text)
+            .await?;
+        Ok(action_description)
     }
 
     async fn execute_tool_answer_question(
-        &self,
-        _args: serde_json::Value,
-        _cancellation_token: Option<CancellationToken>,
+        &mut self,
+        args: serde_json::Value,
+        cancellation_token: Option<CancellationToken>,
     ) -> Result<String> {
-        // TODO: 实现回答问题功能
-        Ok("Answer question action executed".to_string())
+        let question = args.get("question").and_then(|v|v.as_str()).ok_or_else(|| anyhow!("'question' is required"))?;
+        return self.summarize_page(Some(question), cancellation_token).await;
     }
 
     async fn execute_tool_summarize_page(
-        &self,
-        _args: serde_json::Value,
-        _cancellation_token: Option<CancellationToken>,
-    ) -> Result<String> {
-        // TODO: 实现页面总结功能
-        Ok("Summarize page action executed".to_string())
+        &mut self,
+        question: Option<&str>,
+        cancellation_token: Option<CancellationToken>,
+    ) -> Result<String> { 
+        return self.summarize_page(question, cancellation_token).await;
     }
 
     async fn execute_tool_hover(
@@ -575,4 +737,105 @@ impl WebAgent {
         Ok("Press action executed".to_string())
     }
 
+    fn target_name(&self, target: &str, rects: &HashMap<String, InteractiveRegion>) -> Option<String> {
+        rects
+            .get(target)
+            .and_then(|region| region.aria_name.as_ref())
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+    }
+
+    pub async fn summarize_page(
+        &mut self, 
+        _question: Option<&str>, 
+        _cancellation_token: Option<CancellationToken>
+    ) -> Result<String> {
+    /* 
+        let page_markdown = self
+            .chrome_ctrl
+            .as_mut()
+            .ok_or_else(|| anyhow!("Chrome controller not initialized"))?
+            .get_page_markdown(1000)
+            .await?;
+
+        let title = self
+            .chrome_ctrl
+            .as_mut()
+            .ok_or_else(|| anyhow!("Chrome controller not initialized"))?
+            .get_title()
+            .await?;
+
+            let screenshot_bytes = self
+            .chrome_ctrl
+            .as_mut()
+            .ok_or_else(|| anyhow!("Chrome controller not initialized"))?
+            .get_screenshot(None)
+            .await?;
+
+        let img = image::load_from_memory_with_format(&screenshot_bytes, ImageFormat::Png)?;
+        let scaled = img.resize_exact(MLM_WIDTH, MLM_HEIGHT, image::imageops::FilterType::Triangle);
+        let ag_image = AGImage::from_dynamic_image(&scaled);
+
+        // 构建提示
+        let prompt = (&title, question);
+
+        // Token 计算
+        let bpe = get_bpe_from_model("gpt-4o")
+            .map_err(|e| anyhow!("Tokenization error: {}", e))?;
+
+        let prompt_tokens = bpe.encode_with_special_tokens(&prompt).len();
+        let max_content_tokens = MAX_MODEL_TOKENS
+            .saturating_sub(SCREENSHOT_TOKENS)
+            .saturating_sub(prompt_tokens)
+            .saturating_sub(1000); // 缓冲
+
+        let content = if max_content_tokens == 0 {
+            prompt.clone()
+        } else {
+            let content_tokens = bpe.encode_with_special_tokens(&page_markdown);
+            if content_tokens.len() > max_content_tokens {
+                let truncated_tokens = &content_tokens[..max_content_tokens];
+                let truncated_text = bpe.decode(truncated_tokens);
+                format!("Page content (truncated):\n{}\n\n{}", truncated_text, prompt)
+            } else {
+                format!("Page content:\n{}\n\n{}", page_markdown, prompt)
+            }
+        };
+
+        let mut messages = vec![
+            LLMMessage::System(SystemMessage {
+                content: WEB_SURFER_QA_SYSTEM_MESSAGE.to_string(),
+            }),
+            LLMMessage::User(UserMessage {
+                content: vec![content.into(), ag_image.into()],
+                source: self.name.clone(),
+            }),
+        ];
+
+
+        let response = self
+            .model_client
+            .create(&messages, cancellation_token)
+            .await
+            .map_err(|e| anyhow!("LLM error: {}", e))?;
+
+        self.model_usage.push(response.usage.clone());
+
+        Ok(response.content)
+        */
+        Ok("".to_string())
+    }
+
+    fn web_surfer_qa_prompt(title: &str, question: Option<&str>) -> String {
+        let base_prompt = format!(
+            "We are visiting the webpage '{}'. Its full-text content are pasted below, along with a screenshot of the page's current viewport.",
+            title
+        );
+    
+        if let Some(q) = question {
+            format!("{} Please answer the following question completely: '{}':\n\n", base_prompt, q)
+        } else {
+            format!("{} Please summarize the webpage into one or two paragraphs:\n\n", base_prompt)
+        }
+    }
 }

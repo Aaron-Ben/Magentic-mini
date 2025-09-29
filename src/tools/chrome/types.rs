@@ -36,7 +36,8 @@ pub struct InteractiveRegion {
     pub tag_name: String,
     pub role: String,
     #[serde(rename = "aria-name")]
-    pub aria_name: String,
+    #[serde(default)]
+    pub aria_name: Option<String>,
     #[serde(rename = "v-scrollable")]
     pub v_scrollable: bool,
     pub rects: Vec<DOMRectangle>,
