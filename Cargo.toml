@@ -36,6 +36,8 @@ url = "2.4"
 tldextract = "0.6"
 urlencoding = "2.1"
 regex = "1"
+async-openai = "0.23"
+base64 = "0.22"
 
 # PDF 处理相关依赖
 pdf-extract = "0.7"

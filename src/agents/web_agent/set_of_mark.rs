@@ -19,11 +19,11 @@ pub struct PageState {
     pub visible_rects: Vec<String>,
     pub rects_above: Vec<String>,
     pub rects_below: Vec<String>,
-    pub rects: HashMap<String,String>,
+    pub element_id_mapping: HashMap<String,String>,
 }
 
 
-pub fn _add_set_of_mark(
+pub fn add_set_of_mark(
     screenshot: &[u8],
     rois: &HashMap<String, InteractiveRegion>,
     use_sequential_ids: bool,
@@ -144,7 +144,7 @@ pub fn _add_set_of_mark(
         visible_rects: new_visible_rects, 
         rects_above: new_rects_above, 
         rects_below: new_rects_below, 
-        rects: id_mapping,
+        element_id_mapping: id_mapping,
     })
 }
 

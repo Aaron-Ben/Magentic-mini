@@ -10,11 +10,42 @@ pub struct RequestUsage {
     completion_tokens: i32,
 }
 
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct AgentId {
+    pub agent_type: String,
+    pub key: String,
+}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl AgentId {
+    pub fn new(agent_type: impl Into<String>, key: impl Into<String>) -> Self {
+        Self {
+            agent_type: agent_type.into(),
+            key: key.into(),
+        }
+    }
+}
+
+/// TopicId: 主题标识（type + source）
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct TopicId {
+    pub topic_type: String,
+    pub source: String,
+}
+
+impl TopicId {
+    pub fn new(topic_type: impl Into<String>, source: impl Into<String>) -> Self {
+        Self {
+            topic_type: topic_type.into(),
+            source: source.into(),
+        }
+    }
+}
+
+
+#[derive(Debug, Clone)]
 pub struct MessageContext {
-    pub sender: Option<String>,
-    pub topic_id: Option<String>,              // 消息的去处
+    pub sender: Option<AgentId>,
+    pub topic_id: Option<TopicId>,             
     pub is_rpc: bool,
     pub cancellation_token: CancellationToken,  
     pub message_id: String,                     

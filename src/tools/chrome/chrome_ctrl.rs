@@ -5,7 +5,7 @@ use anyhow::{ Result, Context};
 use serde_json;
 use tokio::fs;
 use serde_json::Value;
-use thirtyfour::{DesiredCapabilities,WebDriver, WindowHandle};
+use thirtyfour::{DesiredCapabilities, WebDriver, WindowHandle};
 use thirtyfour::prelude::*;
 use tokio::time::sleep;
 use std::collections::HashMap;
@@ -18,7 +18,7 @@ use crate::tools::chrome::types::{InteractiveRegion, VisualViewport, PageMetadat
 /// Chrome 浏览器控制器
 #[derive(Debug)]
 pub struct Chrome {
-    driver: Arc<WebDriver>,
+    pub driver: Arc<WebDriver>,
     anim_utils: AnimationUtils,
     animate_actions: bool,
     single_tab_mode: bool,
@@ -39,11 +39,17 @@ impl Chrome {
         })
     }
 
-    // 导航到指定的URL，而且智能处理下载文件，将下载的文件保存到指定的文件夹，并显示确认的页面
-    pub async fn visit_page(&self, url: &str) -> Result<(bool,bool)> {
-        // TODO
+    pub async fn sleep(&self, duration: u64) -> Result<()> {
+        self.wait_for_page_ready().await?;
+        sleep(Duration::from_millis(duration)).await;
+        Ok(())
+    }
+
+    // 导航到指定的URL(而且智能处理下载文件，将下载的文件保存到指定的文件夹，并显示确认的页面) 暂不进行实现下载逻辑
+    pub async fn visit_page(&self, url: &str) -> Result<bool> {
+        self.wait_for_page_ready();
         self.driver.get(url).await?;
-        Ok((false,false))
+        Ok(true)
     }
 
     pub async fn get_url(&self) -> Result<String> {
@@ -69,12 +75,11 @@ impl Chrome {
             vec![]
         ).await?;
 
-        sleep(Duration::from_millis(1000)).await;
         Ok(())
     }
 
     /// 标签页的管理
-    async fn new_tab(&self, url: &str) -> Result<WindowHandle> {
+    pub async fn new_tab(&self, url: &str) -> Result<WindowHandle> {
         let url = url.trim();
         self.driver.execute(&format!("window.open('{}', 'www.google.com');", url), vec![]).await?;
         
@@ -129,7 +134,7 @@ impl Chrome {
         Ok(tabs_info)
     }
 
-    pub async fn switch_to_tab(&self, handle: &WindowHandle) -> Result<()> {
+    pub async fn switch_tab(&self, handle: &WindowHandle) -> Result<()> {
         self.driver.switch_to_window(handle.clone()).await?;
         Ok(())
     }
@@ -339,6 +344,8 @@ impl Chrome {
         let result: HashMap<String, InteractiveRegion> = serde_json::from_value(serde_value.clone())
             .context("Failed to deserialize interactive rects from JSON")?;
 
+        // println!("result: {:?}", result); 
+
         Ok(result)
     }
 
@@ -481,7 +488,7 @@ impl Chrome {
         Ok(page_text)
     }
 
-    async fn get_visible_text(&self) -> Result<String> {
+    pub async fn get_visible_text(&self) -> Result<String> {
         let init_script = include_str!("page_script.js");
         self.driver
             .execute(init_script, Vec::new())
@@ -576,70 +583,158 @@ impl Chrome {
         Ok((message_content, screenshot, metadata_hash))
     }
 
-    // 点击具有特定 __elementId 属性的元素。它能处理右键点击、按住点击、在单标签模式下阻止新窗口打开，以及检测点击后触发的下载或新页面
+    // 点击具有特定 __elementId 属性的元素。它能处理右键点击、按住点击（在单标签模式下阻止新窗口打开，以及检测点击后触发的下载或新页面） 括号内暂不进行实现
     pub async fn click_id(
         &mut self,
-        identifier: &str,
-        hold: f64,
+        identifier: &str,   // 特定元素的标号
+        _hold: f64,         // 长按（暂未实现）
         button: &str,       // "left" | "right"
-    ) -> Result<Option<PageInfo>> {
+    ) -> Result<Option<String>> {
 
-        /*         
-        let selector = format!("[__elementId=\"{}\"]", identifier);
+        let _ = self.wait_for_page_ready().await?;
 
-        // 1. 等待元素可见（模拟 wait_for_selector）
-        self.wait_for_element_visible(&selector, self.timeout_load * 1000).await?;
+        // 首先检查元素是否存在，如果不存在则先扫描页面
+        let element_exists = self.driver.execute(
+            &format!(
+                r#"
+                const element = document.querySelector('[__elementId="{}"]');
+                return element !== null;
+                "#,
+                identifier
+            ),
+            vec![]
+        ).await?;
 
-        // 2. 滚动到视图内
-        self.scroll_into_view(&selector).await?;
-
-        // 3. 获取元素边界框
-        let bbox = self.get_bounding_box(&selector).await?
-            .ok_or_else(|| anyhow::anyhow!("Element not visible: {}", identifier))?;
-        let center_x = bbox.x + bbox.width / 2.0;
-        let center_y = bbox.y + bbox.height / 2.0;
-
-        if self.single_tab_mode {
-            self.driver.execute(&format!(
-                r#"document.querySelector('{}').removeAttribute('target');
-                   document.querySelectorAll('a[target=_blank], form[target=_blank]')
-                          .forEach(e => e.removeAttribute('target')); "#,
-                selector
-            ), vec![]).await?;
+        let element_exists: bool = element_exists.json().as_bool().unwrap_or(false);
+        
+        if !element_exists {
+            println!("元素 {} 不存在，开始扫描页面...", identifier);
+            // 重新扫描页面以获取所有交互元素
+            self.get_interactive_rects().await?;
+            
+            // 再次检查元素是否存在
+            let element_exists_after_scan = self.driver.execute(
+                &format!(
+                    r#"
+                    const element = document.querySelector('[__elementId="{}"]');
+                    return element !== null;
+                    "#,
+                    identifier
+                ),
+                vec![]
+            ).await?;
+            
+            let element_exists_after_scan: bool = element_exists_after_scan.json().as_bool().unwrap_or(false);
+            
+            if !element_exists_after_scan {
+                return Err(anyhow::anyhow!("元素 '{}' 在页面中不存在", identifier));
+            }
         }
 
+        // 滚动到元素可见
+        self.driver.execute(
+            &format!(
+                r#"
+                const element = document.querySelector('[__elementId="{}"]');
+                if (!element) {{
+                    throw new Error('Element with ID "{}" not found');
+                }}
+                element.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                return true;
+                "#, 
+                identifier, identifier
+            ),
+            vec![]
+        ).await?;
 
-        let new_page = if self.single_tab_mode {
-            self.perform_click(center_x, center_y, hold, button).await?;
-            None
-        } else {
-            // 监听新页面（WebDriver 通常通过 window handles 实现）
-            let original_handles = self.get_window_handles().await?;
-            self.perform_click(center_x, center_y, hold, button).await?;
+        // 等待让元素滚动完成
+        self.sleep(300).await?;
 
-            // 等待新窗口出现
-            let new_handles = timeout(
-                Duration::from_millis(self.timeout_load * 1000),
-                self.wait_for_new_window(&original_handles)
-            ).await;
+        let rect = self
+        .driver
+        .execute(
+            &format!(
+                r#"
+                const el = document.querySelector('[__elementId="{}"]');
+                if (!el) throw new Error('Element not found');
+                const rect = el.getBoundingClientRect();
+                return {{ x: rect.left, y: rect.top, width: rect.width, height: rect.height }};
+                "#,
+                identifier
+            ),
+            vec![],
+        )
+        .await?;
 
-            match new_handles {
-                Ok(Some(new_handle)) => {
-                    self.switch_to_window(&new_handle).await?;
-                    let url = self.get_current_url().await?;
-                    Some(PageInfo { url })
-                }
-                _ => None,
+        let rect_data: serde_json::Value = rect.json().clone();
+        let x = rect_data["x"].as_f64().unwrap_or(0.0);
+        let y = rect_data["y"].as_f64().unwrap_or(0.0);
+        let width = rect_data["width"].as_f64().unwrap_or(0.0);
+        let height = rect_data["height"].as_f64().unwrap_or(0.0);
+
+        let center_x = x + width / 2.0;
+        let center_y = y + height / 2.0;
+
+        // 3. 记录原始窗口句柄（用于检测新标签页）
+        let original_handles = self.driver.windows().await?;
+
+        // 4. 执行带动画的鼠标移动
+        if self.animate_actions {
+            self.anim_utils
+                .add_cursor_box(&self.driver, identifier)
+                .await?;
+
+            let (start_x, start_y) = self.anim_utils.last_cursor_position;
+            self.anim_utils
+                .gradual_cursor_animation(
+                    &self.driver,
+                    start_x,
+                    start_y,
+                    center_x,
+                    center_y,
+                    10,
+                    50,
+                )
+                .await?;
+            self.sleep(100).await?;
+        }
+
+        // 5. 执行点击操作
+        match button {
+            "left" | "right" => {
+                let action_chain = self.driver.as_ref().action_chain()
+                    .move_to(center_x as i64, center_y as i64);
+
+                let action_chain = if button == "left" {
+                    action_chain.click()
+                } else {
+                    action_chain.context_click()
+                };
+
+                action_chain.perform().await?;
             }
-
-            if self.sleep_after_action > 0 {
-                sleep(Duration::from_secs(self.sleep_after_action)).await;
+            _ => {
+                return Err(anyhow::anyhow!("Unsupported mouse button"));
             }
+        }
 
+        // 6. 清理动画
+        if self.animate_actions {
+            self.anim_utils
+                .remove_cursor_box(&self.driver, identifier)
+                .await?;
+        }
 
-        Ok(new_page)
-        */
-    
+        // 7. 检测是否打开了新标签页/窗口
+        self.sleep(300).await?;
+        let current_handles = self.driver.windows().await?;
+
+        let new_handle = current_handles
+            .into_iter()
+            .find(|h| !original_handles.contains(h))
+            .map(|h| h.to_string());
+
+        Ok(new_handle)
     }
 
     /// 将鼠标悬停在具有特定标识符的元素上
@@ -662,7 +757,7 @@ impl Chrome {
         identifier: &str,
     ) -> Result<()> {
         // 确保页面已加载完成
-        self.wait_for_page_ready().await;
+       let _ = self.wait_for_page_ready().await;
         
         // 等待元素可见
         let _element_selector = format!("[__elementId='{}']", identifier);
@@ -674,7 +769,7 @@ impl Chrome {
         ).await?;
         
         // 等待一下让滚动完成
-        sleep(Duration::from_millis(300)).await;
+        self.sleep(300).await?;
         
         // 获取元素边界框
         let rect = self.driver.execute(
@@ -716,7 +811,7 @@ impl Chrome {
                 50
             ).await?;
             
-            sleep(Duration::from_millis(100)).await;
+            self.sleep(100).await?;
             
             // 移动到元素中心
             self.driver.action_chain()
@@ -745,7 +840,7 @@ impl Chrome {
         delete_existing_text: bool,
     ) -> Result<()> {
         // 确保页面已加载完成
-        self.wait_for_page_ready().await;
+        let _ = self.wait_for_page_ready().await;
         
         // 等待元素可见
         let _element_selector = format!("[__elementId='{}']", identifier);
@@ -814,7 +909,7 @@ impl Chrome {
                 50
             ).await?;
             
-            sleep(Duration::from_millis(100)).await;
+            self.sleep(100).await?;
         }
         
         // 点击元素获得焦点
@@ -843,7 +938,7 @@ impl Chrome {
                 self.driver.action_chain()
                     .send_keys(&ch.to_string())
                     .perform().await?;
-                sleep(Duration::from_millis(delay_ms)).await;
+                self.sleep(delay_ms).await?;
             }
         } else {
             // 直接输入文本
@@ -854,7 +949,7 @@ impl Chrome {
         
         // 按回车键
         if press_enter {
-            sleep(Duration::from_millis(100)).await; // 等待建议出现
+            self.sleep(100).await?;
             self.driver.action_chain()
                 .send_keys(Key::Enter)
                 .perform().await?;
@@ -868,8 +963,35 @@ impl Chrome {
         Ok(())
     }
 
+    pub async fn get_focused_rect_id(&self) -> Result<String> {
+        self.wait_for_page_ready().await;
+
+
+        let script_exists = self.driver.execute(
+            "return typeof WebSurfer !== 'undefined';",
+            vec![]
+        ).await?;
+        
+        if !script_exists.json().as_bool().unwrap_or(false) {
+            // 如果脚本不存在，先注入
+            let init_script = include_str!("page_script.js");
+            self.driver.execute(init_script, Vec::new()).await?;
+        }
+
+        let focused = self.driver.execute(
+            "return WebSurfer.getFocusedElementId();",
+            vec![]
+        ).await?;
+        let focused_id = focused
+            .json()
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        Ok(focused_id)
+    }
+
     async fn quit(self) -> Result<()> {
-        Arc::try_unwrap(self.driver)
+        let _ = Arc::try_unwrap(self.driver)
             .map_err(|_| anyhow::anyhow!("Failed to unwrap driver"))?
             .quit()
             .await
@@ -883,19 +1005,26 @@ impl Chrome {
 mod test {
     use super::*;
     use anyhow::Result;
-    use tokio::time::{sleep, Duration};
-
+    // chromedriver --port=9515  
     #[tokio::test]
     async fn test_chrome() -> Result<()> {
         let chrome = Chrome::new().await?;
         let tab1 = chrome.new_tab("https://www.bilibili.com").await?;
-        chrome.switch_to_tab(&tab1).await?;
-        sleep(Duration::from_secs(2)).await;
+        chrome.switch_tab(&tab1).await?;
+        chrome.sleep(2000).await?;
+        let tab2 = chrome.new_tab("https://www.baidu.com").await?;
+        chrome.switch_tab(&tab2).await?;
+        chrome.sleep(2000).await?;
         let cur_url = chrome.get_url().await?;
         println!("当前Url:{}",cur_url);
-        chrome.get_interactive_rects().await?;
+
+        let interactive_rects = chrome.get_interactive_rects().await?;
+        println!("找到 {} 个交互元素", interactive_rects.len());
+
+        let res = chrome.get_focused_rect_id().await?;
+        println!("res: {:?}", res);
         
-        sleep(Duration::from_secs(2)).await;
+        chrome.sleep(2000).await?;
         // 关闭浏览器
         chrome.quit().await?;
         Ok(())
@@ -905,13 +1034,28 @@ mod test {
     async fn test_hover_id() -> Result<()> {
         let mut chrome = Chrome::new().await?;
         let tab = chrome.new_tab("https://www.bilibili.com").await?;
-        chrome.switch_to_tab(&tab).await?;
-        sleep(Duration::from_secs(2)).await;
+        chrome.switch_tab(&tab).await?;
+        chrome.sleep(2000).await?;
         let interactive_rects = chrome.get_interactive_rects().await?;
         println!("找到 {} 个交互元素", interactive_rects.len());
         println!("开始测试hover_id方法");
         chrome.hover_id("19").await?;
-        sleep(Duration::from_secs(2)).await;
+        chrome.sleep(2000).await?;
+        chrome.quit().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_click_id() -> Result<()> {
+        let mut chrome = Chrome::new().await?;
+        let tab = chrome.new_tab("https://www.bilibili.com").await?;
+        chrome.switch_tab(&tab).await?;
+        chrome.sleep(2000).await?;
+
+        println!("开始测试点击方法，尝试点击元素 29");
+        chrome.click_id("29", 0.0, "right").await?;
+        
+        chrome.sleep(2000).await?;
         chrome.quit().await?;
         Ok(())
     }
@@ -921,8 +1065,8 @@ mod test {
         let mut chrome = Chrome::new().await?;
         
         let tab = chrome.new_tab("https://www.bilibili.com").await?;
-        chrome.switch_to_tab(&tab).await?;
-        sleep(Duration::from_secs(2)).await;
+        chrome.switch_tab(&tab).await?;
+        chrome.sleep(2000).await?;
         
         // 获取交互元素信息
         let interactive_rects = chrome.get_interactive_rects().await?;
@@ -937,7 +1081,7 @@ mod test {
         ).await?;
         
         println!("成功输入文本并按下回车");
-        sleep(Duration::from_secs(3)).await;
+        chrome.sleep(2000).await?;
         
         // 检查当前URL是否包含搜索内容
         let current_url = chrome.get_url().await?;
@@ -950,7 +1094,7 @@ mod test {
         }
     
         
-        sleep(Duration::from_secs(2)).await;
+        chrome.sleep(2000).await?;
         chrome.quit().await?;
         Ok(())
     }
