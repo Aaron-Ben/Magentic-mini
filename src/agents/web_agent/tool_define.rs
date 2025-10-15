@@ -1,12 +1,5 @@
 use crate::tools::tool_metadata::{load_tool, make_approval_prompt, ToolSchema};
 
-
-const EXPLANATION_TOOL_PROMPT: &str =
-    "Explain to the user the action to be performed and reason for doing so. Phrase as if you are directly talking to the user.";
-
-const REFINED_GOAL_PROMPT: &str =
-    "1) Summarize all the information observed and actions performed so far and 2) refine the request to be completed";
-
 // --- Approval Prompt (used elsewhere) ---
 pub const IRREVERSIBLE_ACTION_PROMPT: &str = 
     include_str!("irreversible_prompt.txt");
@@ -245,21 +238,6 @@ const TOOL_HOVER_JSON: &str = r#"{
     "metadata": { "requires_approval": "never" }
 }"#;
 
-const TOOL_KEYPRESS_JSON: &str = r#"{
-    "function": {
-        "name": "keypress",
-        "description": "Press one or multiple keyboard keys in sequence, this is not used for typing text. Supports special keys like 'Enter', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Backspace', 'Delete', 'Escape', 'Control', 'Alt', 'Shift'.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "explanation": { "type": "string", "description": "Explain to the user the action to be performed and reason for doing so. Phrase as if you are directly talking to the user." },
-                "keys": { "type": "array", "items": { "type": "string" }, "description": "List of keys to press in sequence. For special keys, use their full name (e.g. 'Enter', 'Tab', etc.)." }
-            },
-            "required": ["explanation", "keys"]
-        }
-    },
-    "metadata": { "requires_approval": "maybe" }
-}"#;
 
 const TOOL_ANSWER_QUESTION_JSON: &str = r#"{
     "function": {
@@ -422,7 +400,6 @@ pub struct DefaultTools {
     pub scroll_element_down: ToolSchema,
     pub scroll_element_up: ToolSchema,
     pub hover: ToolSchema,
-    pub keypress: ToolSchema,
     pub answer_question: ToolSchema, // name: "answer_question"
     pub summarize_page: ToolSchema,
     pub sleep: ToolSchema,
@@ -451,7 +428,6 @@ impl DefaultTools {
             scroll_element_down: load_tool(TOOL_SCROLL_ELEMENT_DOWN_JSON)?,
             scroll_element_up: load_tool(TOOL_SCROLL_ELEMENT_UP_JSON)?,
             hover: load_tool(TOOL_HOVER_JSON)?,
-            keypress: load_tool(TOOL_KEYPRESS_JSON)?,
             answer_question: load_tool(TOOL_ANSWER_QUESTION_JSON)?,
             summarize_page: load_tool(TOOL_SUMMARIZE_PAGE_JSON)?,
             sleep: load_tool(TOOL_SLEEP_JSON)?,

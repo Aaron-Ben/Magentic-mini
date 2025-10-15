@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
+use urlencoding::encode;
 use std::sync::Arc;
 use std::collections::HashSet;
 use regex::Regex;
@@ -12,19 +13,12 @@ use image::{imageops::FilterType};
 use crate::agents::web_agent::prompt::WEB_SURFER_SYSTEM_MESSAGE;
 use crate::agents::web_agent::set_of_mark::{PageState, add_set_of_mark};
 use crate::agents::web_agent::tool_define::DefaultTools;
-use crate::agents::web_agent::types::FunctionCall;
+use crate::clients::{call_llm, LLMResponse, FunctionCall};
 use crate::tools::chrome::chrome_ctrl::Chrome;
 use crate::tools::chrome::types::InteractiveRegion;
 use crate::tools::tool_metadata::ToolSchema;
 use crate::tools::url_status_manager::{UrlStatus, UrlStatusManager};
-use crate::types::message::{CancellationToken, LLMMessage, SystemMessage, TextMessage, UserMessage, MessageContent};
-
-#[derive(Debug)]
-pub enum LLMResponse {
-    Text(String),
-    FunctionCalls(Vec<FunctionCall>),
-    Error(String),
-}
+use crate::types::message::{LLMMessage, SystemMessage, TextMessage, UserMessage, MessageContent};
 
 #[async_trait::async_trait]
 pub trait ActionGuard: Send + Sync + Debug{
@@ -35,9 +29,8 @@ pub trait ActionGuard: Send + Sync + Debug{
 pub struct WebAgent {
     chrome_ctrl: Option<Chrome>,
     chat_history: Option<Vec<LLMMessage>>,
-    // chat_history: Option<Vec<LLMMessage>>,
-    tools: Vec<ToolSchema>,
-
+    inner_messages: Vec<TextMessage>,
+    prior_metadata_hash: Option<String>,
     url_status_manager: UrlStatusManager,
     last_rejected_url: Option<String>,
     action_guard: Option<Arc<dyn ActionGuard>>,     // 安全在多线程环境中使用，指出任意实现 ActionGuard trait 的类型
@@ -47,40 +40,11 @@ pub struct WebAgent {
 impl Default for WebAgent {
 
     fn default() -> Self {
-        let default_tools = DefaultTools::new()
-        .expect("Failed to load default tools");
-
-        let tools = vec![
-            default_tools.visit_url,
-            default_tools.web_search,
-            default_tools.history_back,
-            default_tools.refresh_page,
-            default_tools.page_up,
-            default_tools.page_down,
-            default_tools.scroll_down,
-            default_tools.scroll_up,
-            default_tools.click,
-            default_tools.click_full,
-            default_tools.input_text,
-            default_tools.scroll_element_down,
-            default_tools.scroll_element_up,
-            default_tools.hover,
-            default_tools.keypress,
-            default_tools.answer_question,
-            default_tools.summarize_page,
-            default_tools.sleep,
-            default_tools.stop_action,
-            default_tools.select_option,
-            default_tools.create_tab,
-            default_tools.switch_tab,
-            default_tools.close_tab,
-            default_tools.upload_file,
-        ];
-
         Self {
             chrome_ctrl: None,
             chat_history: Some(Vec::new()),
-            tools,
+            inner_messages: Vec::new(),
+            prior_metadata_hash: None,
             url_status_manager: UrlStatusManager::new(None, None),
             last_rejected_url: None,
             action_guard: None,
@@ -172,7 +136,7 @@ impl WebAgent {
     pub async fn get_llm_response(
         &self,
     ) -> Result<(
-        LLMResponse,
+        Vec<LLMResponse>,
         HashMap<String,InteractiveRegion>,
         Vec<ToolSchema>,
         HashMap<String,String>,
@@ -226,16 +190,15 @@ impl WebAgent {
             &default_tools.web_search,
             &default_tools.click,
             &default_tools.input_text,
-            &default_tools.answer_question,
+            // &default_tools.answer_question,
             &default_tools.sleep,
             &default_tools.hover,
             &default_tools.history_back,
-            &default_tools.keypress,
             &default_tools.refresh_page,
             &default_tools.scroll_down,
             &default_tools.scroll_up,
-            &default_tools.page_up,
-            &default_tools.page_down,
+            // &default_tools.page_up,
+            // &default_tools.page_down,
             &default_tools.create_tab,
         ];
 
@@ -246,10 +209,6 @@ impl WebAgent {
         if num_tabs > 1 {
             tools.push(default_tools.switch_tab.clone());
             tools.push(default_tools.close_tab.clone());
-        }
-
-        if page_state.element_id_mapping.iter().any(|(_, rect)| rect == "option") {
-           tools.push(default_tools.select_option.clone());
         }
 
         // 获取当前聚焦的元素
@@ -381,199 +340,22 @@ impl WebAgent {
         // println!("history: {:?}", history);
 
         // 7. 获取模型响应
-        let llm_response = self.call_llm(&history, &tools).await?;
+        let llm_responses = call_llm(&history, &tools).await?;
         
         // 8. 解析响应，判断是否需要执行工具
-        let (content, need_execute_tool) = match llm_response {
-            // 如果是文本响应，不需要执行工具
-            LLMResponse::Text(text) => {
-                (LLMResponse::Text(text), false)
-            }
-            // 如果是函数调用，需要执行工具
-            LLMResponse::FunctionCalls(calls) => {
-                (LLMResponse::FunctionCalls(calls), true)
-            }
-            // 如果是错误
-            LLMResponse::Error(err) => {
+        let need_execute_tool = llm_responses.iter().any(|resp| {
+            matches!(resp, LLMResponse::FunctionCalls(_))
+        });
+        
+        // 检查是否有错误
+        for resp in &llm_responses {
+            if let LLMResponse::Error(err) = resp {
                 return Err(anyhow!("LLM Error: {}", err));
             }
-        };
-
-        Ok((content, rects, tools, page_state.element_id_mapping, need_execute_tool))
-    }
-
-
-    /// 调用 LLM 获取响应
-    async fn call_llm(
-        &self, 
-        history: &[LLMMessage], 
-        tools: &[ToolSchema]
-    ) -> Result<LLMResponse> {
-        use async_openai::{
-            types::{
-                ChatCompletionRequestMessage, 
-                ChatCompletionRequestSystemMessage,
-                ChatCompletionRequestUserMessage,
-                ChatCompletionRequestUserMessageContent,
-                CreateChatCompletionRequest,
-                ImageUrl,
-                ImageDetail,
-            },
-            config::OpenAIConfig,
-            Client,
-        };
-        use base64::{Engine as _, engine::general_purpose};
-        
-        // 1. 初始化客户端（支持 OpenAI 和阿里云 DashScope）
-        // 优先使用阿里云 DashScope，其次是 OpenAI
-        let (api_key, base_url, model) = if let Ok(dashscope_key) = std::env::var("DASHSCOPE_API_KEY") {
-            // 使用阿里云 DashScope
-            let url = std::env::var("DASHSCOPE_BASE_URL")
-                .unwrap_or_else(|_| "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string());
-            let model_name = std::env::var("DASHSCOPE_MODEL")
-                .unwrap_or_else(|_| "qwen-vl-max".to_string());
-            (dashscope_key, url, model_name)
-        } else if let Ok(openai_key) = std::env::var("OPENAI_API_KEY") {
-            // 使用 OpenAI
-            let url = std::env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-            let model_name = std::env::var("OPENAI_MODEL")
-                .unwrap_or_else(|_| "gpt-4o".to_string());
-            (openai_key, url, model_name)
-        } else {
-            return Err(anyhow!("Neither DASHSCOPE_API_KEY nor OPENAI_API_KEY is set"));
-        };
-        
-        let config = OpenAIConfig::new()
-            .with_api_key(api_key)
-            .with_api_base(base_url);
-        
-        let client = Client::with_config(config);
-        
-        // 2. 转换消息为 API 格式
-        let mut api_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
-        
-        for msg in history {
-            match msg {
-                LLMMessage::System(sys_msg) => {
-                    api_messages.push(ChatCompletionRequestMessage::System(
-                        ChatCompletionRequestSystemMessage {
-                            content: sys_msg.content.clone(),
-                            name: None,
-                        }
-                    ));
-                }
-                LLMMessage::User(user_msg) => {
-                    let mut content_parts = Vec::new();
-                    
-                    for content in &user_msg.content {
-                        match content {
-                            MessageContent::Text(text) => {
-                                content_parts.push(
-                                    async_openai::types::ChatCompletionRequestMessageContentPart::Text(
-                                        async_openai::types::ChatCompletionRequestMessageContentPartText {
-                                            text: text.clone(),
-                                        }
-                                    )
-                                );
-                            }
-                            MessageContent::Image(img_bytes) => {
-                                // 将图片转换为 base64
-                                let base64_img = general_purpose::STANDARD.encode(img_bytes);
-                                let data_url = format!("data:image/png;base64,{}", base64_img);
-                                
-                                content_parts.push(
-                                    async_openai::types::ChatCompletionRequestMessageContentPart::ImageUrl(
-                                        async_openai::types::ChatCompletionRequestMessageContentPartImage {
-                                            image_url: ImageUrl {
-                                                url: data_url,
-                                                detail: Some(ImageDetail::Auto),
-                                            }
-                                        }
-                                    )
-                                );
-                            }
-                        }
-                    }
-                    
-                    api_messages.push(ChatCompletionRequestMessage::User(
-                        ChatCompletionRequestUserMessage {
-                            content: ChatCompletionRequestUserMessageContent::Array(content_parts),
-                            name: None,
-                        }
-                    ));
-                }
-                LLMMessage::Assistant(asst_msg) => {
-                    #[allow(deprecated)]
-                    api_messages.push(ChatCompletionRequestMessage::Assistant(
-                        async_openai::types::ChatCompletionRequestAssistantMessage {
-                            content: Some(asst_msg.content.clone()),
-                            name: None,
-                            tool_calls: None,
-                            function_call: None,
-                        }
-                    ));
-                }
-            }
         }
-        
-        // 3. 转换工具为 API 格式
-        let api_tools: Vec<async_openai::types::ChatCompletionTool> = tools
-            .iter()
-            .map(|tool| {
-                // 将 ParametersSchema 转换为 JSON Value
-                let parameters_json = serde_json::to_value(&tool.parameters)
-                    .unwrap_or(serde_json::json!({}));
-                
-                async_openai::types::ChatCompletionTool {
-                    r#type: async_openai::types::ChatCompletionToolType::Function,
-                    function: async_openai::types::FunctionObject {
-                        name: tool.name.clone(),
-                        description: Some(tool.description.clone()),
-                        parameters: Some(parameters_json),
-                    },
-                }
-            })
-            .collect();
-        
-        // 4. 创建请求
-        let request = CreateChatCompletionRequest {
-            model,  // 使用动态选择的模型
-            messages: api_messages,
-            tools: Some(api_tools),
-            temperature: Some(0.7),
-            ..Default::default()
-        };
-        
-        // 5. 调用 API
-        let response = client.chat().create(request).await
-            .map_err(|e| anyhow!("OpenAI API error: {}", e))?;
-        
-        // 6. 解析响应
-        if let Some(choice) = response.choices.first() {
-            // 检查是否有工具调用
-            if let Some(tool_calls) = &choice.message.tool_calls {
-                let function_calls: Vec<FunctionCall> = tool_calls
-                    .iter()
-                    .map(|tc| FunctionCall {
-                        id: tc.id.clone(),
-                        name: tc.function.name.clone(),
-                        arguments: tc.function.arguments.clone(),
-                    })
-                    .collect();
-                return Ok(LLMResponse::FunctionCalls(function_calls));
-            }
-            
-            // 否则返回文本响应
-            if let Some(content) = &choice.message.content {
-                return Ok(LLMResponse::Text(content.clone()));
-            }
-        }
-        
-        // 如果没有有效响应
-        Err(anyhow!("No valid response from LLM"))
-    }
 
+        Ok((llm_responses, rects, tools, page_state.element_id_mapping, need_execute_tool))
+    }
 
     async fn get_page_state_and_elements(&self) -> Result<(PageState, HashMap<String, InteractiveRegion>)> {
         let rects = self.chrome_ctrl.as_ref().unwrap().get_interactive_rects().await?;
@@ -749,34 +531,43 @@ impl WebAgent {
         targets.into_iter().map(|(_, target)| target).collect()
     }
 
-    pub async fn executor_tool(
+    async fn execute_tool(
         &mut self,
         messages: Vec<FunctionCall>,                    // 提取工具的名称
         rects: HashMap<String, InteractiveRegion>,      // 主要传递给需要与页面元素交互的工具
         tools: Vec<ToolSchema>,                         // 工具列表
         element_id_mapping: HashMap<String, String>,    // 为页面元素提供ID映射
-        cancellation_token: Option<CancellationToken>,  // 支持异步操作的取消功能
     ) -> Result<String> {
-        // 确保浏览器上下文已准备好，保证仅有一个FunctionCall（为了一次执行一个动作）
+        // 1. 确保浏览器上下文已准备好
         self.chrome_ctrl
             .as_ref()
             .ok_or_else(|| anyhow!("Chrome controller not initialized"))?
             .wait_for_page_ready()
             .await?;
 
+        // 2. 保证仅有一个FunctionCall（为了一次执行一个动作）
         if messages.len() != 1 {
             return Err(anyhow::anyhow!("Expected exactly one function call"));
         }
 
-        // 从 function call 中获取参数(工具的名称[name] 和 参数[arguments])
+        // 3. 从 function call 中获取参数(工具的名称[name] 和 参数[arguments])
         let function_call = &messages[0];
         let name = &function_call.name;
-        let args: serde_json::Value = serde_json::from_str(&function_call.arguments)
+        let args = serde_json::from_str(&function_call.arguments)
             .map_err(|e| anyhow::anyhow!("Failed to parse function arguments: {}", e))?;
 
-        println!("Executing tool: {}({})", name, serde_json::to_string(&args)?);
+        // 4. 记录工具调用
+        let tool_call_msg = format!("{}({})", name, serde_json::to_string(&args)?);
+        
+        println!("🔧 工具调用: {}", tool_call_msg);
 
-        // 验证工具是否存在
+        self.inner_messages.push(TextMessage {
+            content: tool_call_msg,
+            source: self.name.clone(),
+            metadata: HashMap::new(),
+        });
+
+        // 5. 验证工具是否存在
         let available_tools: Vec<String> = tools.iter()
             .map(|tool| tool.name.clone())
             .collect();
@@ -790,39 +581,47 @@ impl WebAgent {
             ));
         }
 
-        // 根据工具名称执行对应的工具函数
+        // 6. 根据工具名称执行对应的工具函数
         let action_description = match name.as_str() {
             "click" => self.execute_tool_click(args, &rects, &element_id_mapping).await?,
             "input_text" => self.execute_tool_input_text(args, &rects, &element_id_mapping).await?,
             "hover" => self.execute_tool_hover(args, &rects, &element_id_mapping).await?,
-            "select_option" => self.execute_tool_select_option(args, &rects, &element_id_mapping).await?,
-            "upload_file" => self.execute_tool_upload_file(args, &rects, &element_id_mapping).await?,
+            "select_option" => self.execute_tool_select_option().await?,    // TODO
+            "upload_file" => self.execute_tool_upload_file().await?,        // TODO
             "click_full" => self.execute_tool_click_full(args, &rects, &element_id_mapping).await?,
-            "answer_question" => self.execute_tool_answer_question(args, cancellation_token).await?,
-            // "summarize_page" => self.execute_tool_summarize_page(args, cancellation_token).await?,
+            "answer_question" => self.execute_tool_answer_question().await?,    // TODO
             "visit_url" => self.execute_tool_visit_url(args).await?,
+            "web_search" => self.execute_tool_web_search(args).await?,
+            "history_back" => self.execute_tool_history_back().await?,
+            "refresh_page" => self.execute_tool_refresh_page().await?,
+            "page_up" => self.execute_tool_page_up().await?,
+            "page_down" => self.execute_tool_page_down().await?,
+            "scroll_down" => self.execute_tool_scroll_down(args).await?,
+            "scroll_up" => self.execute_tool_scroll_up(args).await?,
+            "sleep" => self.execute_tool_sleep(args).await?,
+            "stop_action" => self.execute_tool_stop_action(args).await?,
+            "summarize_page" => self.execute_tool_summarize_page().await?,  // TODO
+            "create_tab" => self.execute_tool_create_tab(args).await?,
+            "switch_tab" => self.execute_tool_switch_tab(args).await?,
+            "close_tab" => self.execute_tool_close_tab(args).await?,
             _ => {
                 return Err(anyhow::anyhow!("Tool '{}' is not implemented yet", name));
             }
         };
 
-        // TODO: 处理下载相关逻辑
-        // if let Some(last_download) = &self.last_download {
-        //     if let Some(download_folder) = &self.downloads_folder {
-        //         action_description.push_str(&format!(
-        //             "\n\nSuccessfully downloaded '{}' to local path: {}",
-        //             last_download.suggested_filename,
-        //             download_folder
-        //         ));
-        //     }
-        // }
+        // 7. TODO: 清理动画（如果实现了动画功能）
+        // self.chrome_ctrl.as_ref().unwrap().cleanup_animations().await?;
 
         Ok(action_description)
     }
 
     // 终止Agent执行，并返回最终的答案
-    pub async fn execute_tool_stop_action(&mut self, args: String) -> Result<String> {
-        Ok(args)
+    async fn execute_tool_stop_action(&mut self, args: Value) -> Result<String> {
+        let ans = args
+            .get("answer")
+            .and_then(|v|v.as_str())
+            .unwrap_or("I stopped the action.");
+        Ok(ans.to_string())
     }
 
     async fn execute_tool_visit_url(&mut self, args: Value) -> Result<String> {
@@ -832,6 +631,7 @@ impl WebAgent {
             .ok_or_else(|| anyhow!("Chrome controller not initialized"))?
             .wait_for_page_ready()
             .await?;
+
         let url = args
             .get("url")
             .and_then(|v|v.as_str())
@@ -851,12 +651,13 @@ impl WebAgent {
                 || url.starts_with("about:") 
             {
                 self.chrome_ctrl.as_ref().unwrap().visit_page(url).await?
-            } else if url.contains(" ") {
+            } else if url.contains(' ') {
                 let (ret, approved) = self.check_url_and_generate_msg("bing.com".to_string()).await?;
                 if !approved {
                     return Ok(ret);
                 }
-                let search_url = format!("https://www.bing.com/search?q={}", url);
+                let encoded = encode(url);
+                let search_url = format!("https://www.bing.com/search?q={}&FROM=QBLH", encoded);
                 self.chrome_ctrl.as_ref().unwrap().visit_page(&search_url).await?
             } else {
                 let full_url = format!("https://{}", url);
@@ -865,7 +666,7 @@ impl WebAgent {
 
         // 4. 更新状态
         if reset_prior_metadata {
-            // self.prior_metadata_hash = None;
+            self.prior_metadata_hash = None;
         }
 
         Ok(action_description)
@@ -891,26 +692,28 @@ impl WebAgent {
 
     async fn execute_tool_web_search(&mut self, args: serde_json::Value) -> Result<String> {
 
-        self.chrome_ctrl.as_ref().unwrap().wait_for_page_ready().await?;
         let (ret, approved) = self.check_url_and_generate_msg("bing.com".to_string()).await?;
 
         if !approved {
             return Ok(ret);
         }
 
-        let query = args.get("query").and_then(|v|v.as_str()).ok_or_else(|| anyhow::anyhow!("Query is required"))?;
-        let search_url = format!("https://www.bing.com/search?q={}&FORM=QBLH", query);
-        self.chrome_ctrl.as_ref().unwrap().visit_page(&search_url).await?;
+        let query = args
+            .get("query")
+            .and_then(|v|v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Query is required"))?;
 
-        let reset_prior_metadata = self
-            .chrome_ctrl
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Chrome controller not initialized"))?
-            .visit_page(&search_url)
-            .await?;
+        let encode_query = encode(query);
+        let search_url = format!("https://www.bing.com/search?q={}&FORM=QBLH", encode_query);
+
+
+        let chrome = self.chrome_ctrl.as_ref().ok_or_else(|| anyhow!("Chrome controller not initialized"))?;
+        chrome.wait_for_page_ready().await?;
+
+        let reset_prior_metadata = chrome.visit_page(&search_url).await?;
 
         if reset_prior_metadata {
-            // self.prior_metadata_hash = None;
+            self.prior_metadata_hash = None;
         }
 
         Ok(format!("I typed '{}' into the browser search bar.", query))
@@ -942,18 +745,24 @@ impl WebAgent {
         Ok(format!("I scrolled up {} pixels in the browser.", pixels))
     }
 
+    // 基础的点击
     async fn execute_tool_click(
-        &self,
+        &mut self,
         args: serde_json::Value,
         rects: &HashMap<String, InteractiveRegion>,
         element_id_mapping: &HashMap<String, String>,
     ) -> Result<String> {
-        let target_id = args.get("target_id").and_then(|v|v.as_str()).unwrap_or("1");
+        let target_id = args
+            .get("target_id")
+            .and_then(|v|v.as_str())
+            .ok_or_else(|| anyhow!("'target_id' is required"))?;
 
-        let target_name = self.target_name(target_id, &rects);
-        let mapped_id = element_id_mapping
+        let mapping_id = element_id_mapping
             .get(target_id)
             .ok_or_else(|| anyhow!("Target ID '{}' not found in mapping", target_id))?;
+
+        let target_name = self.target_name(mapping_id, rects);
+        
 
         let action_description = if let Some(name) = target_name {
             format!("I clicked '{}'.", name)
@@ -961,47 +770,43 @@ impl WebAgent {
             "I clicked the control.".to_string()
         };
 
-        // let new_page_info = self
-        //     .chrome_ctrl
-        //     .as_ref()
-        //     .ok_or_else(|| anyhow!("Chrome controller not initialized"))?
-        //     .click_id(mapped_id, 0.0, "left")
-        //     .await?;
+        let chrome_ctrl = self.chrome_ctrl.as_mut()
+            .ok_or_else(|| anyhow!("Chrome controller not initialized"))?;
 
-        // if let Some(page_info) = new_page_info {
-            // self.prior_metadata_hash = None; // 重置元数据
+        // 新旧页面判断
+        let new_page = chrome_ctrl.click_id(mapping_id, 0.0, "left").await?;
 
-            // let (ret, approved) = self
-            //     .check_url_and_generate_msg(page_info.url.clone())
-            //     .await?;
-            // if !approved {
-            //     return Ok(ret);
-            // }
-        // }
+        if new_page {
+            let new_page_url = chrome_ctrl.get_url().await?;
+            let (ret, approved) = self
+                .check_url_and_generate_msg(new_page_url)
+                .await?;
+            if !approved {
+                return Ok(ret);
+            }
+        }
         
         Ok(action_description)
     }
 
+    // 完整的点击（左/右/长按）
     async fn execute_tool_click_full(
-        &self,
+        &mut self,
         args: serde_json::Value,
         rects: &HashMap<String, InteractiveRegion>,
         element_id_mapping: &HashMap<String, String>,
     ) -> Result<String> {
         let target_id = args
-        .get("target_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("'target_id' is required"))?;
+            .get("target_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("'target_id' is required"))?;
 
-        let target_name = self.target_name(target_id, &rects);
-        let mapped_id = element_id_mapping
+        let mapping_id = element_id_mapping
             .get(target_id)
             .ok_or_else(|| anyhow!("Target ID '{}' not found in mapping", target_id))?;
+        
+        let target_name = self.target_name(mapping_id, &rects);
 
-            let hold = args
-            .get("hold")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
         let button = args
             .get("button")
             .and_then(|v| v.as_str())
@@ -1009,37 +814,37 @@ impl WebAgent {
 
         let action_description = if let Some(name) = target_name {
             format!(
-                "I clicked '{}' with button '{}' and hold {} seconds.",
-                name, button, hold
+                "I clicked '{}' with button '{}'.",
+                name, button
             )
         } else {
             format!(
-                "I clicked the control with button '{}' and hold {} seconds.",
-                button, hold
+                "I clicked the control with button '{}'",
+                button
             )
         };
 
-        // let new_page_info = self
-        //     .chrome_ctrl
-        //     .as_ref()
-        //     .ok_or_else(|| anyhow!("Chrome controller not initialized"))?
-        //     .click_id(mapped_id, hold, button)
-        //     .await?;
+        let chrome_ctrl = self.chrome_ctrl.as_mut()
+            .ok_or_else(|| anyhow!("Chrome controller not initialized"))?;
 
-        // if let Some(page_info) = new_page_info {
-        //     // self.prior_metadata_hash = None;
+        let new_page = chrome_ctrl
+            .click_id(mapping_id, 0.0, button)
+            .await?;
 
-        //     let (ret, approved) = self
-        //         .check_url_and_generate_msg(page_info.url.clone())
-        //         .await?;
-        //     if !approved {
-        //         return Ok(ret);
-        //     }
-        // }
+        if new_page {
+            let new_page_url = chrome_ctrl.get_url().await?;
+            let (ret, approved) = self
+                .check_url_and_generate_msg(new_page_url)
+                .await?;
+            if !approved {
+                return Ok(ret);
+            }
+        }
 
         Ok(action_description)
     }
 
+    // input_field_id 应该是String ，还是&str? 需要考虑
     async fn execute_tool_input_text(
         &mut self,
         args: serde_json::Value,
@@ -1048,24 +853,28 @@ impl WebAgent {
     ) -> Result<String> {
         let input_field_id = args
             .get("input_field_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("'input_field_id' is required"))?;
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| anyhow!("'input_field_id' is required"))?
+            .to_string();
+
         let text_value = args
             .get("text_value")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("'text_value' is required"))?;
+
         let delete_existing_text = args
             .get("delete_existing_text")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+
         let press_enter = args
             .get("press_enter")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
-        let input_field_name = self.target_name(input_field_id, &rects);
-        let mapped_id = element_id_mapping
-            .get(input_field_id)
+        let input_field_name = self.target_name(&input_field_id, rects);
+        let mapping_id = element_id_mapping
+            .get(&input_field_id)
             .ok_or_else(|| anyhow!("Input field ID '{}' not found in mapping", input_field_id))?;
 
         let action_description = if let Some(name) = input_field_name {
@@ -1077,26 +886,23 @@ impl WebAgent {
         self.chrome_ctrl
             .as_mut()
             .ok_or_else(|| anyhow!("Chrome controller not initialized"))?
-            .fill_id(mapped_id, text_value, press_enter, delete_existing_text)
+            .fill_id(mapping_id, text_value, press_enter, delete_existing_text)
             .await?;
         Ok(action_description)
     }
 
     async fn execute_tool_answer_question(
-        &mut self,
-        args: serde_json::Value,
-        cancellation_token: Option<CancellationToken>,
+        &self,
     ) -> Result<String> {
-        let question = args.get("question").and_then(|v|v.as_str()).ok_or_else(|| anyhow!("'question' is required"))?;
-        return self.summarize_page(Some(question), cancellation_token).await;
+        // TODO
+        Ok("Answer question action executed".to_string())
     }
 
     async fn execute_tool_summarize_page(
         &mut self,
-        question: Option<&str>,
-        cancellation_token: Option<CancellationToken>,
     ) -> Result<String> { 
-        return self.summarize_page(question, cancellation_token).await;
+        // TODO
+        Ok("Summarize page action executed".to_string())
     }
 
     async fn execute_tool_hover(
@@ -1110,21 +916,25 @@ impl WebAgent {
             .and_then(|v|v.as_str())
             .ok_or_else(|| anyhow!("'target_id' is required"))?;
         
-        let target_name = self.target_name(target_id, &rects);
         let mapping_id = element_id_mapping
             .get(target_id)
-            .map(|id| id.as_str())
-            .unwrap_or(target_id);
+            .ok_or_else(|| anyhow!("Target ID '{}' not found in mapping", target_id))?;
 
-        let action_descirption = if let Some(name) = target_name {
+        let target_name = self.target_name(mapping_id, rects);
+
+        let action_description = if let Some(name) = target_name {
             format!("I hovered over '{}'.", name)
         } else {
             format!("I hovered over the control.")
         };
 
-        let _ = self.chrome_ctrl.as_mut().unwrap().hover_id(mapping_id).await?;
+        self.chrome_ctrl
+            .as_mut()
+            .ok_or_else(|| anyhow!("Chrome controller not initialized"))?
+            .hover_id(mapping_id)
+            .await?;
 
-        Ok(action_descirption)
+        Ok(action_description)
     }
 
 
@@ -1136,66 +946,66 @@ impl WebAgent {
 
     async fn execute_tool_select_option(
         &self,
-        _args: serde_json::Value,
-        _rects: &HashMap<String, InteractiveRegion>,
-        _element_id_mapping: &HashMap<String, String>,
     ) -> Result<String> {
-        // TODO: 实现选择选项功能
+        // TODO
         Ok("Select option action executed".to_string())
     }
 
     async fn execute_tool_create_tab(&mut self, args: serde_json::Value) -> Result<String> {
-        let url = args.get("url").and_then(|v|v.as_str()).unwrap_or("https://www.bing.com");
+        let url = args
+            .get("url")
+            .and_then(|v|v.as_str())
+            .unwrap_or("https://www.google.com")
+            .trim();
+
         let (ret,approved) = self.check_url_and_generate_msg(url.to_string()).await?;
         if !approved {
             return Ok(ret);
         }
 
         let action_description = format!("I created a new tab and navigated to '{}'.", url);
-        let _ = self.chrome_ctrl.as_mut().unwrap().new_tab(url).await?;
+        let _ = self.chrome_ctrl.as_ref().ok_or_else(|| anyhow!("Chrome controller not initialized"))?.new_tab(url).await?;
 
+        self.prior_metadata_hash = None;
         Ok(action_description)
     }
 
     async fn execute_tool_switch_tab(&mut self, args: serde_json::Value) -> Result<String> {
-        let tab_index = args.get("tab_index").and_then(|v|v.as_i64()).unwrap_or(0);
+        let tab_index = args
+            .get("tab_index")
+            .and_then(|v|v.as_i64())
+            .unwrap_or(0) as usize;
 
-        if tab_index < 0 {
-            return Err(anyhow!("tab_index must be non-negative"));
-        }
+        let chrome_ctrl = self.chrome_ctrl.as_ref().ok_or_else(|| anyhow!("Chrome controller not initialized"))?;
 
-        let chrome_ctrl = self.chrome_ctrl.as_mut().unwrap();
-
-        let handles = chrome_ctrl.driver.window().await?;
-
-        chrome_ctrl.switch_tab(&handles).await?;
+        chrome_ctrl.switch_tab(tab_index).await?;
     
         let action_description = format!("I switched to tab {}.", tab_index);
+
+        self.prior_metadata_hash = None;
         Ok(action_description)
     }
 
     async fn execute_tool_close_tab(&mut self, args: serde_json::Value) -> Result<String> {
-        let tab_index = args.get("tab_index").and_then(|v|v.as_i64()).unwrap_or(0);
-
-        self.chrome_ctrl.as_mut().unwrap().close_tab().await?;
+        let tab_index = args
+            .get("tab_index")
+            .and_then(|v|v.as_i64())
+            .unwrap_or(0) as usize;
+        
+        let chrome_ctrl = self.chrome_ctrl.as_ref().ok_or_else(|| anyhow!("Chrome controller not initialized"))?;
+        chrome_ctrl.close_tab_by_index(tab_index).await?;
     
         let action_description = format!("I closed tab {}.", tab_index);
+
+        self.prior_metadata_hash = None;
         Ok(action_description)
     }
 
     async fn execute_tool_upload_file(
         &self,
-        _args: serde_json::Value,
-        _rects: &HashMap<String, InteractiveRegion>,
-        _element_id_mapping: &HashMap<String, String>,
     ) -> Result<String> {
         // TODO: 实现文件上传功能
         Ok("Upload file action executed".to_string())
-    }
-
-    async fn execute_tool_keypress(&self, _args: serde_json::Value) -> Result<String> {
-        // TODO: 实现按键功能
-        Ok("Press action executed".to_string())
     }
 
     fn target_name(&self, target: &str, rects: &HashMap<String, InteractiveRegion>) -> Option<String> {
@@ -1206,84 +1016,11 @@ impl WebAgent {
             .filter(|name| !name.is_empty())
     }
 
+    // 总结当前的页面
     pub async fn summarize_page(
         &mut self, 
-        _question: Option<&str>, 
-        _cancellation_token: Option<CancellationToken>
     ) -> Result<String> {
-    /* 
-        let page_markdown = self
-            .chrome_ctrl
-            .as_mut()
-            .ok_or_else(|| anyhow!("Chrome controller not initialized"))?
-            .get_page_markdown(1000)
-            .await?;
-
-        let title = self
-            .chrome_ctrl
-            .as_mut()
-            .ok_or_else(|| anyhow!("Chrome controller not initialized"))?
-            .get_title()
-            .await?;
-
-            let screenshot_bytes = self
-            .chrome_ctrl
-            .as_mut()
-            .ok_or_else(|| anyhow!("Chrome controller not initialized"))?
-            .get_screenshot(None)
-            .await?;
-
-        let img = image::load_from_memory_with_format(&screenshot_bytes, ImageFormat::Png)?;
-        let scaled = img.resize_exact(MLM_WIDTH, MLM_HEIGHT, image::imageops::FilterType::Triangle);
-        let ag_image = AGImage::from_dynamic_image(&scaled);
-
-        // 构建提示
-        let prompt = (&title, question);
-
-        // Token 计算
-        let bpe = get_bpe_from_model("gpt-4o")
-            .map_err(|e| anyhow!("Tokenization error: {}", e))?;
-
-        let prompt_tokens = bpe.encode_with_special_tokens(&prompt).len();
-        let max_content_tokens = MAX_MODEL_TOKENS
-            .saturating_sub(SCREENSHOT_TOKENS)
-            .saturating_sub(prompt_tokens)
-            .saturating_sub(1000); // 缓冲
-
-        let content = if max_content_tokens == 0 {
-            prompt.clone()
-        } else {
-            let content_tokens = bpe.encode_with_special_tokens(&page_markdown);
-            if content_tokens.len() > max_content_tokens {
-                let truncated_tokens = &content_tokens[..max_content_tokens];
-                let truncated_text = bpe.decode(truncated_tokens);
-                format!("Page content (truncated):\n{}\n\n{}", truncated_text, prompt)
-            } else {
-                format!("Page content:\n{}\n\n{}", page_markdown, prompt)
-            }
-        };
-
-        let mut messages = vec![
-            LLMMessage::System(SystemMessage {
-                content: WEB_SURFER_QA_SYSTEM_MESSAGE.to_string(),
-            }),
-            LLMMessage::User(UserMessage {
-                content: vec![content.into(), ag_image.into()],
-                source: self.name.clone(),
-            }),
-        ];
-
-
-        let response = self
-            .model_client
-            .create(&messages, cancellation_token)
-            .await
-            .map_err(|e| anyhow!("LLM error: {}", e))?;
-
-        self.model_usage.push(response.usage.clone());
-
-        Ok(response.content)
-        */
+        // TODO
         Ok("".to_string())
     }
 
@@ -1340,28 +1077,31 @@ mod tests {
         println!("\n🤖 正在调用 LLM 获取响应...");
         
         // 4. 调用 get_llm_response 获取 LLM 的决策
-        let (response, rects, tools, element_id_mapping, need_execute_tool) = 
+        let (responses, rects, tools, element_id_mapping, need_execute_tool) = 
             agent.get_llm_response().await?;
 
         // 5. 打印结果
         println!("\n{}", "=".repeat(60));
-        println!("📊 LLM 响应结果: {:?}", response);
+        println!("📊 LLM 响应结果数量: {}", responses.len());
         println!("{}", "=".repeat(60));
         
-        match &response {
-            LLMResponse::Text(text) => {
-                println!("\n💬 文本响应：\n{}", text);
-            }
-            LLMResponse::FunctionCalls(calls) => {
-                println!("\n🔧 工具调用（共 {} 个）：", calls.len());
-                for (i, call) in calls.iter().enumerate() {
-                    println!("\n  [{}] 工具名称: {}", i + 1, call.name);
-                    println!("      工具ID: {}", call.id);
-                    println!("      参数: {}", call.arguments);
+        for (idx, response) in responses.iter().enumerate() {
+            println!("\n响应 [{}]:", idx + 1);
+            match response {
+                LLMResponse::Text(text) => {
+                    println!("💬 文本响应：\n{}", text);
                 }
-            }
-            LLMResponse::Error(err) => {
-                println!("\n❌ 错误: {}", err);
+                LLMResponse::FunctionCalls(calls) => {
+                    println!("🔧 工具调用（共 {} 个）：", calls.len());
+                    for (i, call) in calls.iter().enumerate() {
+                        println!("\n  [{}] 工具名称: {}", i + 1, call.name);
+                        println!("      工具ID: {}", call.id);
+                        println!("      参数: {}", call.arguments);
+                    }
+                }
+                LLMResponse::Error(err) => {
+                    println!("❌ 错误: {}", err);
+                }
             }
         }
         
@@ -1372,7 +1112,7 @@ mod tests {
         
         // 6. 如果需要执行工具，展示第一个工具的详细信息
         if need_execute_tool {
-            if let LLMResponse::FunctionCalls(calls) = &response {
+            if let Some(LLMResponse::FunctionCalls(calls)) = responses.first() {
                 if let Some(first_call) = calls.first() {
                     println!("\n{}", "=".repeat(60));
                     println!("🎯 第一个工具调用详情");
@@ -1384,6 +1124,10 @@ mod tests {
                         println!("参数（格式化）:");
                         println!("{}", serde_json::to_string_pretty(&args).unwrap_or(first_call.arguments.clone()));
                     }
+                    
+                    // 执行工具
+                    let res = agent.execute_tool(vec![first_call.clone()], rects.clone(), tools.clone(), element_id_mapping.clone()).await?;
+                    println!("\n🔧 工具调用结果: {}", res);
                 }
             }
         }
@@ -1398,4 +1142,6 @@ mod tests {
         
         Ok(())
     }
+
 }
+
