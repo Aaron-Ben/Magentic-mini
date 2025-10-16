@@ -1,3 +1,6 @@
+use crate::{orchestrator::message::BaseChatMessage, types::plan::Plan};
+use serde::{Serialize, Deserialize};
+
 // 维护群聊对话的状态
 /* OrchestratorState 存在的必要性：Orchestrator本身不足以管理复杂的多代理对话，
 Orchestrator仅仅是编排逻辑的执行者，需要一个专门的状态管理模块来管理群聊对话的状态
@@ -12,9 +15,8 @@ pub struct OrchestratorState {
     pub current_step_idx: usize,                // 当前进行的步骤
     pub information_collected: String,          // 收集的信息
     pub in_planning_mode: bool,                 // 是否处于规划模式
-    pub is_paused: bool,
     pub group_topic_type: String,               // 群聊的讨论主题
-    pub message_history: Vec<Box<dyn ChatMessage>>,  // 完整的对话历史
+    pub message_history: Vec<BaseChatMessage>,  // 完整的对话历史
     pub participant_topic_types: Vec<String>,   // 参与者主题类型列表
     pub n_replans: usize,                       // 重规划的次数
 }
@@ -30,7 +32,6 @@ impl OrchestratorState {
         self.information_collected = String::new();
         self.in_planning_mode = true;
         self.message_history = vec![];
-        self.is_paused = false;
         self.n_replans = 0;
     }
 
@@ -42,7 +43,27 @@ impl OrchestratorState {
         self.n_rounds = 0;
         self.current_step_idx = 0;
         self.in_planning_mode = true;
-        self.is_paused = false;
         self.n_replans = 0;
     }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct ProgressLedger {
+    pub is_current_step_complete: BoolWithReason,
+    pub need_to_replan: BoolWithReason,
+    pub instruction_or_question: InstructionOrQuestion,
+    pub progress_summary: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct BoolWithReason {
+    pub reason: String,
+    pub answer: bool,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct InstructionOrQuestion {
+    pub answer: String,
+    #[serde(rename = "agent_name")]
+    pub agent_name: String,
 }

@@ -14,8 +14,12 @@ use async_openai::{
 };
 use base64::{Engine as _, engine::general_purpose};
 
-use crate::tools::tool_metadata::ToolSchema;
-use crate::types::message::{LLMMessage, MessageContent};
+use crate::{
+    orchestrator::message::{
+        FunctionCall, LLMMessage, UserContent, MultiModalContent, AssistantContent
+    }, 
+    tools::tool_metadata::ToolSchema
+};
 
 /// LLM 响应类型
 #[derive(Debug, Clone)]
@@ -23,14 +27,6 @@ pub enum LLMResponse {
     Text(String),
     FunctionCalls(Vec<FunctionCall>),
     Error(String),
-}
-
-/// 函数调用信息
-#[derive(Clone, Debug)]
-pub struct FunctionCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: String,
 }
 
 /// 调用 LLM API（支持 OpenAI 和阿里云 DashScope）
@@ -62,7 +58,7 @@ pub async fn call_llm(
     
     for msg in history {
         match msg {
-            LLMMessage::System(sys_msg) => {
+            LLMMessage::SystemMessage(sys_msg) => {
                 api_messages.push(ChatCompletionRequestMessage::System(
                     ChatCompletionRequestSystemMessage {
                         content: sys_msg.content.clone(),
@@ -70,35 +66,50 @@ pub async fn call_llm(
                     }
                 ));
             }
-            LLMMessage::User(user_msg) => {
+            LLMMessage::UserMessage(user_msg) => {
                 let mut content_parts = Vec::new();
                 
-                for content in &user_msg.content {
-                    match content {
-                        MessageContent::Text(text) => {
-                            content_parts.push(
-                                async_openai::types::ChatCompletionRequestMessageContentPart::Text(
-                                    async_openai::types::ChatCompletionRequestMessageContentPartText {
-                                        text: text.clone(),
-                                    }
-                                )
-                            );
-                        }
-                        MessageContent::Image(img_bytes) => {
-                            // 将图片转换为 base64
-                            let base64_img = general_purpose::STANDARD.encode(img_bytes);
-                            let data_url = format!("data:image/png;base64,{}", base64_img);
-                            
-                            content_parts.push(
-                                async_openai::types::ChatCompletionRequestMessageContentPart::ImageUrl(
-                                    async_openai::types::ChatCompletionRequestMessageContentPartImage {
-                                        image_url: ImageUrl {
-                                            url: data_url,
-                                            detail: Some(ImageDetail::Auto),
-                                        }
-                                    }
-                                )
-                            );
+                match &user_msg.content {
+                    UserContent::String(text) => {
+                        // 纯文本消息
+                        content_parts.push(
+                            async_openai::types::ChatCompletionRequestMessageContentPart::Text(
+                                async_openai::types::ChatCompletionRequestMessageContentPartText {
+                                    text: text.clone(),
+                                }
+                            )
+                        );
+                    }
+                    UserContent::MultiModal(contents) => {
+                        // 多模态消息
+                        for content in contents {
+                            match content {
+                                MultiModalContent::String(text) => {
+                                    content_parts.push(
+                                        async_openai::types::ChatCompletionRequestMessageContentPart::Text(
+                                            async_openai::types::ChatCompletionRequestMessageContentPartText {
+                                                text: text.clone(),
+                                            }
+                                        )
+                                    );
+                                }
+                                MultiModalContent::Image(img_bytes) => {
+                                    // 将图片转换为 base64
+                                    let base64_img = general_purpose::STANDARD.encode(img_bytes);
+                                    let data_url = format!("data:image/png;base64,{}", base64_img);
+                                    
+                                    content_parts.push(
+                                        async_openai::types::ChatCompletionRequestMessageContentPart::ImageUrl(
+                                            async_openai::types::ChatCompletionRequestMessageContentPartImage {
+                                                image_url: ImageUrl {
+                                                    url: data_url,
+                                                    detail: Some(ImageDetail::Auto),
+                                                }
+                                            }
+                                        )
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -110,16 +121,25 @@ pub async fn call_llm(
                     }
                 ));
             }
-            LLMMessage::Assistant(asst_msg) => {
+            LLMMessage::AssistantMessage(asst_msg) => {
+                let content_str = match &asst_msg.content {
+                    AssistantContent::String(s) => Some(s.clone()),
+                    AssistantContent::FunctionCalls(_) => None,
+                };
+                
                 #[allow(deprecated)]
                 api_messages.push(ChatCompletionRequestMessage::Assistant(
                     async_openai::types::ChatCompletionRequestAssistantMessage {
-                        content: Some(asst_msg.content.clone()),
+                        content: content_str,
                         name: None,
                         tool_calls: None,
                         function_call: None,
                     }
                 ));
+            }
+            LLMMessage::FunctionExecutionResultMessage(_func_result) => {
+                // TODO: 处理函数执行结果消息
+                // 暂时跳过
             }
         }
     }

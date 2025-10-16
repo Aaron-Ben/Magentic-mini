@@ -8,7 +8,7 @@ use dyn_clone::DynClone;
 use anyhow::{anyhow, Result};
 use tracing::{info, warn, error};
 
-use crate::types::message::{AgentId, BaseChatMessage, CancellationToken, GroupChatEvent, MessageContext, TopicId};
+use crate::types::message::{AgentId, GroupChatEvent, MessageContext, TopicId};
 // runtime 的作用是依据topic_id，将消息分发给对应的代理
 
 #[async_trait]
@@ -105,14 +105,12 @@ pub enum MessageEnvelope {
         message: GroupChatEvent,
         topic_id: TopicId,
         sender: Option<AgentId>,
-        cancellation_token: CancellationToken,
         message_id: String,
     },
     Send {
         message: GroupChatEvent,
         recipient: AgentId,
         sender: Option<AgentId>,
-        cancellation_token: CancellationToken,
         message_id: String,
         response_tx: tokio::sync::oneshot::Sender<BaseChatMessage>,
     },
@@ -170,7 +168,6 @@ impl AgentRuntime {
             message,
             topic_id,
             sender,
-            cancellation_token: CancellationToken::new(),
             message_id,
         };
         
@@ -194,7 +191,6 @@ impl AgentRuntime {
             message,
             recipient,
             sender,
-            cancellation_token: CancellationToken::new(),
             message_id,
             response_tx: tx,
         };
@@ -222,24 +218,22 @@ impl AgentRuntime {
     ) -> Result<()> {
         while let Ok(envelope) = receiver.recv().await {
             match envelope {
-                MessageEnvelope::Publish { message, topic_id, sender, cancellation_token, message_id } => {
+                MessageEnvelope::Publish { message, topic_id, sender, message_id } => {
                     Self::handle_publish(
                         message,
                         topic_id,
                         sender,
-                        cancellation_token,
                         message_id,
                         &agents,
                         &output_sender,
                         &sub_mgr,
                     ).await;
                 }
-                MessageEnvelope::Send { message, recipient, sender, cancellation_token, message_id, response_tx } => {
+                MessageEnvelope::Send { message, recipient, sender, message_id, response_tx } => {
                     Self::handle_send(
                         message,
                         recipient,
                         sender,
-                        cancellation_token,
                         message_id,
                         response_tx,
                         &agents,
@@ -256,7 +250,6 @@ impl AgentRuntime {
         message: GroupChatEvent,
         topic_id: TopicId,
         sender: Option<AgentId>,
-        cancellation_token: CancellationToken,
         message_id: String,
         agents: &Arc<RwLock<HashMap<AgentId, Arc<dyn Agent>>>>,
         output_sender: &async_channel::Sender<BaseChatMessage>,
@@ -288,7 +281,6 @@ impl AgentRuntime {
                 let output_sender = output_sender.clone();
                 let topic_id = topic_id.clone();
                 let sender = sender.clone();
-                let cancellation_token = cancellation_token.clone();
                 let message_id = message_id.clone();
                 
                 let handle = tokio::spawn(async move {
@@ -304,7 +296,6 @@ impl AgentRuntime {
                             sender,
                             topic_id: Some(topic_id),
                             is_rpc: false,
-                            cancellation_token,
                             message_id,
                         };
                         
@@ -340,7 +331,6 @@ impl AgentRuntime {
         message: GroupChatEvent,
         recipient: AgentId,
         sender: Option<AgentId>,
-        cancellation_token: CancellationToken,
         message_id: String,
         response_tx: tokio::sync::oneshot::Sender<BaseChatMessage>,
         agents: &Arc<RwLock<HashMap<AgentId, Arc<dyn Agent>>>>,
@@ -359,7 +349,6 @@ impl AgentRuntime {
                     sender,
                     topic_id: None,
                     is_rpc: true,
-                    cancellation_token,
                     message_id,
                 };
                 

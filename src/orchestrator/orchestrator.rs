@@ -1,16 +1,15 @@
 use chrono::Local;
 use serde_json::Value as JsonValue;
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use crate::orchestrator::config::OrchestratorConfig;
-use crate::types::event::GroupChatStart;
-use crate::orchestrator::types::{OrchestratorState,MessageContext};
-use crate::types::message::{ChatMessage, LLMMessage, TextMessage, UserMessage};
-use crate::llm::client::{ChatCompletionClient};
+use crate::orchestrator::message::{LLMMessage, TextMessage, UserMessage};
+use crate::orchestrator::types::{OrchestratorState, ProgressLedger};
+
 use anyhow::{bail, Ok, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use async_channel::Sender;
-
 
 
 #[derive(Debug)]
@@ -29,6 +28,7 @@ pub struct Orchestrator<MessageType> {
     // 特有字段
     message: Box<dyn ChatMessage>,
     output_message_queue: Arc<Mutex<Sender<MessageType>>>,
+    model_context: Vec<LLMMessage>,         // 可能有误，暂时先这样
     model_client: Arc<dyn ChatCompletionClient>,
     config: OrchestratorConfig,
     user_agent_topic: String,
@@ -142,30 +142,6 @@ impl <MessageType> Orchestrator<MessageType> {
         Ok(())
     }
 
-
-    // 入口,通过选择发言着让群聊的开始
-    pub async fn handle_start(
-        &mut self,
-        message: GroupChatStart,
-        ctx: MessageContext,
-    ) -> Result<()> {
-        // 检查对话是否已经终止
-
-        // 确保消息不为空
-
-        // 发送消息给所有代理
-        
-
-        // 将消息添加到历史记录
-        for msg in message.messages {
-            self.state.message_history.push(msg);
-        }
-
-        self.orchestrator_step(ctx.cancellation_token).await?;
-
-        Ok(())
-    }
-
     async fn handle_agent_response(
         &self,
 
@@ -175,24 +151,21 @@ impl <MessageType> Orchestrator<MessageType> {
 
     async fn prepare_final_answer(
         &self,
+        reason: String,
+        final_answer: Option<String>,
+        force_stop: bool,
     ) -> Result<()> {
         Ok(())
     }
 
     async fn orchestrator_step(
-        &mut self,
-        ctx: MessageContext,
+        &self,
     ) -> Result<()> { 
         
-        if self.state.is_paused {
-            self.request_next_speaker(&self.user_agent_topic, ctx).await?;
-            return Ok(());
-        }
-
         if self.state.in_planning_mode {
-            self.orchestrator_step_planning(ctx.cancellation_token).await?;
+            self.orchestrator_step_planning().await?;
         } else {
-            self.orchestrator_step_execution(ctx.cancellation_token,false).await?;
+            self.orchestrator_step_execution(false).await?;
         }
 
         Ok(())
@@ -200,7 +173,6 @@ impl <MessageType> Orchestrator<MessageType> {
 
     async fn orchestrator_step_planning(
         &mut self,
-        cancellation_token: CancellationToken,
     ) -> Result<()> { 
 
         // Planning stage
@@ -219,11 +191,38 @@ impl <MessageType> Orchestrator<MessageType> {
 
     async fn orchestrator_step_execution(
         &mut self,
-        cancellation_token: CancellationToken,
         first_step: bool,
     ) -> Result<()> { 
+        // 第一次计划
         if first_step {
-            // TODO
+            
+            let content = format!(
+                r#"
+                We are working to address the following user request:
+                \\n\\n
+                {task}
+                \\n\\n
+                To answer this request we have assembled the following team:
+                \\n\\n
+                {team}
+                \\n\\n
+                Here is the plan to follow as best as possible:
+                \\n\\n
+                {plan}
+                "#,
+                task = self.state.task.clone(),
+                team = self.team_description.clone(),
+                plan = self.state.plan_str.clone(),
+            );
+
+            let ledger_message = TextMessage::new(content, self.name.clone());
+
+            self.state.message_history.push(ledger_message);
+        }
+
+        if self.state.current_step_idx >= self.state.plan.len() || self.state.n_rounds > self.config.max_turns {
+            self.prepare_final_answer("Max rounds reached".to_string(), None, false).await?;
+            return Ok(());
         }
 
         self.state.n_rounds += 1;
@@ -239,50 +238,86 @@ impl <MessageType> Orchestrator<MessageType> {
         );
 
         context.push(LLMMessage::UserMessage(
-            UserMessage::new_text(progress_ledger_prompt, self.name.clone())
+            UserMessage::new(
+                progress_ledger_prompt, self.name.clone()
+            ),
         ));
 
-        let plan_response = self.get_json_response().await?;
+        let json_str = self.get_json_response(context, self).await?;
 
-        if self.state.is_paused {
-            unimplemented!()
+        let progress_ledger: ProgressLedger = serde_json::from_str(json_str).expect("Failed to parse JSON");
+
+        if !first_step {
+            let need_to_replan = progress_ledger.need_to_replan.answer;
+            let replan_reason = progress_ledger.need_to_replan.reason;
+
+            if need_to_replan {
+                if self.state.n_replans < self.config.max_replans {
+                    self.state.n_replans += 1;
+                    self.replan(replan_reason).await?;
+                    return Ok(());
+                } else {
+                    let reason = format!("We need to replan but max replan attempts reached: {replan_reason} ");
+                    self.prepare_final_answer(reason.to_string(), None,None).await?;
+                    return Ok(());
+                }
+            }
+
+            if progress_ledger.is_current_step_complete.answer {
+                self.state.current_step_idx += 1;
+            }
         }
 
-        self.state.plan_str = String::new();
+        if self.state.current_step_idx >= self.state.plan {
+            self.prepare_final_answer("Plan completed".to_string(), None, false).await?;
+            return Ok(());
+        }
 
-        // self.state.message_history.push
+        let new_instruction = self.get_agent_instruction(instruction, agent_name);
 
-        
+        message_to_send = TextMessage::new(new_instruction, self.name, {"internal": true});
+        self.state.message_history.push(message_to_send);
 
-        
-
-        Ok(())
+        let next_speaker = progress_ledger.instruction_or_question.agent_name;
+        for name in self.agent_execution_names {
+            if name == next_speaker {
+                self.request_next_speaker(next_speaker).await?;
+                break;
+            }
+        }
     }
 
     async fn get_json_response(
         &mut self,
-    ) -> Result<()> {
+        messages: Vec<LLMMessage>,
+    ) -> Result<Vec<LLMMessage>> {
 
-        Ok(())
+        self.model_context.clear();
+
+        for message in messages {
+            self.model_context.push(message);
+        }
+
+        // llm_call 这里调用使用model_client，这里应该是LLM使用我们的prompt，给出xxx，暂时结构位置
+        let response = Vec<messages>;
+        Ok(response)
     }
 
     async fn request_next_speaker(
         &mut self,
         next_speaker: &str,
-        ctx: MessageContext,
     ) -> Result<()> { 
         Ok(())
     }
 
 
     // 对话历史转为LLMMessage
-    fn thread_to_context(&self, message:Option<String>) -> Vec<LLMMessage> {
+    fn thread_to_context(&self, message:Option<Vec<BaseChatMessage>>) -> Vec<LLMMessage> {
 
         let chat_messages = message.unwrap_or(&self.state.message_history);
 
-        let mut context_messages = Vec::new();
+        let mut context_messages:Vec<LLMMessage> = Vec::new();
         let date_today = Local::now().format("%Y-%m-%d").to_string();
-
 
         if self.state.in_planning_mode {
             let planning_prompt = format!("This is a planning step. The task is: {}", self.state.task);
@@ -297,7 +332,6 @@ impl <MessageType> Orchestrator<MessageType> {
         }
 
         // 步骤 3: 使用辅助函数转换对话历史
-        // let is_multimodal = self.model_client.model_info.vision;
         // let converted_history = convert_agent_messages_to_llm_messages(
         //     chat_messages,
         //     &self.name,
@@ -333,24 +367,6 @@ impl <MessageType> Orchestrator<MessageType> {
         internal: bool,
         metadata: Option<HashMap<String,String>>
     ) -> Result<()> {
-        let message = TextMessage::new{
-            content : content,
-            source: self.name.clone(),
-            models_usage: None,
-            metadata: metadata.or_else(
-                {
-                    let mut map = std::collections::HashMap::new();
-                    map.insert("internal".to_string(), internal.to_string());
-                    map
-                }
-            ),
-        };
-
-        // publish_message
-
-        self.output_message_queue.send(message).await?;
-
-        // publish_message
 
         Ok(())
     }
@@ -359,17 +375,133 @@ impl <MessageType> Orchestrator<MessageType> {
         &self,
         task: String,
         plan: String,
-        step_index: i32, 
+        step_index: usize, 
         team: String,
         names: Vec<String>,
     ) -> Result<String> {
+        let plan_steps = self
+            .state
+            .plan
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Plan must be initialized"))?;
 
+        if step_index >= plan_steps.len() {
+            return Err(anyhow::anyhow!(
+                "step_index {} is out of bounds (plan has {} steps)",
+                step_index,
+                plan_steps.len()
+            ));
+        }
+
+        let step = &plan_steps[step_index];
+        let names_str = names.join(", ");
         let additional_instructions = String::new();
 
-        let step_type = "PlanStep".to_string();
+        let prompt = format!(
+            r#"
+        We are at step index {step_index} in the plan which is 
+        Title: {step_title}
+        Details: {step_details}
+        agent_name: {agent_name}
+        And we have assembled the following team:
+        {team}
+        The browser the web_surfer accesses is also controlled by the user.
 
-        Ok(String::new())
+        To make progress on the request, please answer the following questions, including necessary reasoning:
+
+            - is_current_step_complete: Is the current step complete? (True if complete, or False if the current step is not yet complete)
+            - need_to_replan: Do we need to create a new plan? (True if user has sent new instructions and the current plan can't address it. True if the current plan cannot address the user request because we are stuck in a loop, facing significant barriers, or the current approach is not working. False if we can continue with the current plan. Most of the time we don't need a new plan.)
+            - instruction_or_question: Provide complete instructions to accomplish the current step with all context needed about the task and the plan. Provide a very detailed reasoning chain for how to complete the step. If the next agent is the user, pose it directly as a question. Otherwise pose it as something you will do.
+            - agent_name: Decide which team member should complete the current step from the list of team members: {names}. 
+            - progress_summary: Summarize all the information that has been gathered so far that would help in the completion of the plan including ones not present in the collected information. This should include any facts, educated guesses, or other information that has been gathered so far. Maintain any information gathered in the previous steps.
+
+        Important: it is important to obey the user request and any messages they have sent previously.
+
+        {additional_instructions}
+
+        Please output an answer in pure JSON format according to the following schema. The JSON object must be parsable as-is. DO NOT OUTPUT ANYTHING OTHER THAN JSON, AND DO NOT DEVIATE FROM THIS SCHEMA:
+
+            {{
+                "is_current_step_complete": {{
+                    "reason": string,
+                    "answer": boolean
+                }},
+                "need_to_replan": {{
+                    "reason": string,
+                    "answer": boolean
+                }},
+                "instruction_or_question": {{
+                    "answer": string,
+                    "agent_name": string (the name of the agent that should complete the step from {names})
+                }},
+                "progress_summary": "a summary of the progress made so far"
+
+            }}
+            "#,
+            task = task,
+            plan = plan,
+            step_index = step_index,
+            step_title = step.title,
+            step_details = step.details,
+            agent_name = step.agent_name,
+            team = team,
+            names = names_str,
+            additional_instructions = additional_instructions,
+        );
+
+        Ok(prompt)
     }
 
-}
+    pub fn validate_plan_json(json_response: &Value) -> bool {
+        let obj = match json_response.as_object() {
+            Some(obj) => obj,
+            None => return false,
+        };
 
+        let keys = ["task", "steps", "needs_plan", "response", "plan_summary"];
+        for &key in &keys {
+            if !obj.contains_key(key) {
+                return false;
+            }
+        }
+
+        let steps = match obj.get("steps").and_then(|v| v.as_array()) {
+            Some(s) => s,
+            None => return false, // "steps" is not an array
+        };
+
+        for step in steps {
+            let step_obj = match step.as_object() {
+                Some(obj) => obj,
+                None => return false,
+            };
+
+            let keys = ["title", "details", "agent_name"];
+            for &key in &keys {
+                if !step_obj.contains_key(key) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    pub fn get_agent_instruction(&self, instruction: String, agent_name: String) -> Result<String> {
+        let prompt = format!(
+            r#"    Step {step_index}: {step_title}
+            \\n\\n
+            {step_details}
+            \\n\\n
+            Instruction for {agent_name}: {instruction}
+            "#,
+            step_index = self.state.current_step_idx + 1,
+            step_title = self.state.plan[self.state.current_step_idx].title,
+            step_details = self.state.plan[self.state.current_step_idx].details,
+            agent_name = agent_name,
+            instruction = instruction,
+            );
+
+            Ok(prompt)
+        }
+
+}

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
+use serde::Deserialize;
+use serde::Serialize;
 use urlencoding::encode;
 use std::sync::Arc;
 use std::collections::HashSet;
@@ -13,17 +15,49 @@ use image::{imageops::FilterType};
 use crate::agents::web_agent::prompt::WEB_SURFER_SYSTEM_MESSAGE;
 use crate::agents::web_agent::set_of_mark::{PageState, add_set_of_mark};
 use crate::agents::web_agent::tool_define::DefaultTools;
-use crate::clients::{call_llm, LLMResponse, FunctionCall};
+use crate::clients::{call_llm, LLMResponse};
+use crate::orchestrator::message::AssistantContent;
+use crate::orchestrator::message::AssistantMessage;
+use crate::orchestrator::message::FunctionCall;
+use crate::orchestrator::message::MultiModalContent;
+use crate::orchestrator::message::MultiModalMessage;
+use crate::orchestrator::message::UserContent;
+use crate::orchestrator::message::LLMMessage;
+use crate::orchestrator::message::SystemMessage;
+use crate::orchestrator::message::TextMessage;
+use crate::orchestrator::message::UserMessage;
 use crate::tools::chrome::chrome_ctrl::Chrome;
 use crate::tools::chrome::types::InteractiveRegion;
 use crate::tools::tool_metadata::ToolSchema;
 use crate::tools::url_status_manager::{UrlStatus, UrlStatusManager};
-use crate::types::message::{LLMMessage, SystemMessage, TextMessage, UserMessage, MessageContent};
 
 #[async_trait::async_trait]
 pub trait ActionGuard: Send + Sync + Debug{
     async fn get_approval(&self, request_msg: TextMessage) -> bool;
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "type")]
+pub enum ChatMessage {
+    #[serde(rename = "TextMessage")]
+    Text(TextMessage),
+
+    #[serde(rename = "MultiModalMessage")]
+    MultiModal(MultiModalMessage),
+}
+
+#[derive(Debug, Clone)]
+pub enum ContentItem {
+    Text(String),
+    Image(Vec<u8>),
+}
+
+#[derive(Debug, Clone)]
+pub struct Response {
+    pub chat_message: ChatMessage,
+    pub inner_messages: Option<Vec<String>>,
+}
+
 
 #[derive(Debug)]
 pub struct WebAgent {
@@ -70,65 +104,205 @@ impl WebAgent {
             .ok_or_else(|| anyhow!("Chrome context is not initialized. Call initialize() first."))
     }
 
-    // web_agent的核心，接收用户或者，ent的消息，驱动浏览器进行一系列的操作，并将操作以流的形式（AsyncGenerator）逐步
-    pub async fn _on_messages_steam(
-        self,
-    ) -> Result<()> {
+    // web_agent的核心，接收用户或者orchestrator的消息，驱动浏览器进行一系列的操作，并将操作以流的形式（AsyncGenerator）逐步返回
+    pub async fn on_messages_steam(
+        mut self,
+        messages: Vec<ChatMessage>,
+    ) -> Result<Vec<Response>> {
 
-        // 懒加载浏览器，确保浏览器已准备好
+        let mut responses = Vec::new();
+        
+        // 1. 依据消息的类型，将消息添加到聊天历史中
+        // （多模态消息全部保留，文本消息只保留最后一条，为了避免历史消息进行影响）
+        let total = messages.len();
+        for (i, chat_message) in messages.into_iter().enumerate() {
+            match chat_message {
+                ChatMessage::Text(text_msg) => {
+                    if i == total - 1 {
+                        self.chat_history.as_mut().unwrap().push(
+                            LLMMessage::UserMessage(
+                                UserMessage::new(
+                                    UserContent::String(text_msg.base.content),
+                                    text_msg.base.base.source,
+                                )
+                            )
+                        );
+                    }
+                }
 
+                ChatMessage::MultiModal(multi_msg) => {
+                    self.chat_history.as_mut().unwrap().push(
+                        LLMMessage::UserMessage(
+                            UserMessage::new(
+                                UserContent::MultiModal(multi_msg.content),
+                                multi_msg.base.source,
+                            )
+                        )
+                    );
+                }
+            }
+        } 
+        
+        // 2.初始化一些变量
+        let mut observations = Vec::<String>::new();
+        let mut emited_responses = Vec::<String>::new();
+        let mut actions_proposed = Vec::<String>::new();
+        let mut action_results = Vec::<String>::new();
+        let mut all_screenshots = Vec::<Vec<u8>>::new();
 
-        // 如果是第一次加载浏览器，发送浏览器的地址？？？（可能是Docker中的）
+        let non_action_tools: HashSet<&str> = 
+            vec!["stop_action", "answer_question"].into_iter().collect();
+        
+        let max_steps = 10; // 最大步骤数
+        
+        // 3. 主循环：从第0步到最大步骤之间的执行
+        for _step in 0..max_steps {
+            
+            // 3.1) 调用LLM，获取下一步要执行的动作
+            let (llm_responses, rects, tools, element_id_mapping, _need_execute_tool) = 
+                self.get_llm_response().await?;
+            
+            // 3.2) 如果不需要工具（思考或总结），输出文本响应并继续
+            let title = self.chrome_ctrl.as_ref().unwrap().get_title().await?;
+            let url = self.chrome_ctrl.as_ref().unwrap().get_url().await?;
+            
+            // 处理第一个 LLM 响应
+            if let Some(first_response) = llm_responses.first() {
+                match first_response {
+                    LLMResponse::Text(text) => {
+                        let summary = format!(
+                            "On the webpage '{}', we propose the following action: {}",
+                            title, text
+                        );
+
+                        // 将LLM的思考添加到历史中
+                        self.chat_history.as_mut().unwrap().push(
+                            LLMMessage::AssistantMessage(AssistantMessage::new(
+                                AssistantContent::String(summary.clone()),
+                                None,
+                                Some(self.name.clone()),
+                            ))
+                        );
+
+                        emited_responses.push(text.clone());
+                        actions_proposed.push(summary);
+
+                        // 进行response
+
+                        break; // 终止循环
+                    }
+                    LLMResponse::FunctionCalls(function_calls) => {
+                        for action in function_calls {
+                            let tool_call_name = action.name.clone();
+                            let tool_call_msg = format!("'{} ({})'", action.name, 
+                                serde_json::to_string(&serde_json::from_str::<Value>(&action.arguments).unwrap()).unwrap());
+                            
+                            let tool_call_explanation = serde_json::from_str::<serde_json::Value>(&action.arguments)
+                                .ok()
+                                .and_then(|v| v.get("explanation").and_then(|e| e.as_str()).map(|s| s.to_string()))
+                                .unwrap_or_default();
+
+                            actions_proposed.push(tool_call_msg.clone());
+                            let action_context = format!("'{}' (at '{}')", title, url);
+                            
+                            self.chat_history.as_mut().unwrap().push(
+                                LLMMessage::AssistantMessage(AssistantMessage::new(
+                                    AssistantContent::String(format!("On the webpage {}, we propose the following action: {}", action_context, tool_call_msg)),
+                                    None,
+                                    Some(self.name.clone())
+                                ))
+                            );
+
+                            // 终止操作
+                            if tool_call_name == "stop_action" {
+                                let tool_call_answer = serde_json::from_str::<serde_json::Value>(&action.arguments)
+                                    .ok()
+                                    .and_then(|v| v.get("answer").and_then(|a| a.as_str()).map(|s| s.to_string()))
+                                    .unwrap_or_default();
+
+                                observations.push(tool_call_answer.clone());
+                                action_results.push(tool_call_answer.clone());
+                                emited_responses.push(tool_call_answer);
+                                // 返回response
+                            }
+
+                            // 普通操作
+                            emited_responses.push(tool_call_explanation);
+                            // 返回response
+
+                            let action_result = self.execute_tool(vec![action.clone()], rects.clone(), tools.clone(), element_id_mapping.clone()).await?;
+                    
+                            let new_screenshot = self.chrome_ctrl.as_ref().unwrap().get_screenshot(None).await?;
+                            all_screenshots.push(new_screenshot.clone());
+
+                            let _content_item = vec![
+                                ContentItem::Text(action_result.clone()),
+                                ContentItem::Image(new_screenshot.clone()),
+                            ];
+
+                            emited_responses.push(action_result.clone());
+
+                            // response
+
+                            let(message_content, _, _metadata_hash) = self
+                                .chrome_ctrl.as_ref().unwrap().describe_page(false).await?;
+                            
+                            observations.push(format!("'{}' \n\n '{}'", action_result, message_content));
+                            action_results.push(action_result.clone());
+
+                            let observation_text = format!("Observation: {}\n\n{}", action_result, message_content);
+
+                            let content = UserContent::MultiModal(vec![
+                                MultiModalContent::String(observation_text),
+                                MultiModalContent::Image(new_screenshot.clone()),
+                            ]);
+
+                            self.chat_history.as_mut().unwrap().push(
+                                LLMMessage::UserMessage(UserMessage::new(
+                                    content,
+                                    self.name.clone()
+                                ))
+                            );
+
+                            if non_action_tools.contains(tool_call_name.as_str()) {
+                                break;
+                            }
+                        }
+                    }
+                    LLMResponse::Error(err) => {
+                        eprintln!("LLM Error: {}", err);
+                        break;
+                    }
+                }
+            }
+        }
+        
+        let all_responses = format!(
+            "The actions the websurfer performed are the following.\n{}",
+            actions_proposed
+                .iter()
+                .zip(action_results.iter())
+                .map(|(a, r)| format!("\n Action: {}\nObservation: {}\n\n", a, r))
+                .collect::<Vec<_>>()
+                .join("")
+        );
+
+        let (message_content, maybe_new_screenshot, metadata_hash) = self
+            .chrome_ctrl.as_ref().unwrap().describe_page(true).await?;
+
+        self.prior_metadata_hash = Some(metadata_hash);
+
+        let message_content_final = format!("\n\n{}\n\n{}", all_responses, message_content);
+
+        let new_screenshot = maybe_new_screenshot.unwrap_or_else(Vec::new);
+
+        let _content = vec![
+            MultiModalContent::String(message_content_final),
+            MultiModalContent::Image(new_screenshot),
+        ];
 
         
-        // 依据消息的类型，将消息添加到content中（多模态消息全部保留，文本消息只保留最后一条，为了避免历史消息进行影响）
-
-        // 初始化一系列东西
-
-        // 如果被暂停，直接返回提示的信息（The WebAgent is paused...）
-
-        // 外部的取消令牌和内部的LLM进行联动，启动一个后台任务，agent被暂停时取消当前LLM操作
-
-        // 从第0步到最大的步骤之间的执行（主循环）最重要的步骤！！！
-            
-            // 1）调用LLM，获取下一步要执行的动作，LLM返回的内容
-                // response
-                // 1）思考 or 总结 不执行工具
-                // 2）Vec<FunctionCall> 工具调用列表（执行工具）
-                // rect: 页面元素的坐标（用于进行标注）
-                // tools: 工具列表
-                // element_id_mapping: 映射页面元素ID
-                // need_execute_tool: 是否需要执行工具
-
-            // (final_usage：用于获取模型使用的token情况)    
-
-            // 2）如果是不需要工具：（思考 or 总结） break
-            
-            // 3) 如果需要工具：解析工具名称名称和参数，对于answer_question的tools,需要添加一句prompt
-
-                // 3.1) 审批机制 Action Guard， 三种机制，必须，无需，由 ActionGuard 
-
-                // 3.2) 需要进行批准的话，动作的预览 是xxx动作，有一个预览的过程，高亮元素？【737-762】
-                
-                // 3.3) 获取用户的审批，如果拒绝，清除动画，中断当前的循环 【764-788】
-
-                // 3.4) 执行工具，实际的动作 【789-808】
-
-                // 3.5) 获取截图+页面描述 【809-848】 和3.6有一些“混在一起了”
-
-                // 3.6）流式返回结果（动作结果+截图），同时记录到一系列的列表中。【821-862】
-
-                // 3.7) 检查终止条件，f tool_call_name in non_action_tools 【863-865】
-                    // 用户要求停止"stop_action", 
-                    // 已读完内容，准备回答"answer_question" i: 
-            
-        // 异常处理：用户取消，返回友好的提示，其他错误，记录日志返回错误【868-895】
-        
-        // 清理工作：确保监控任务被取消，避免资源泄露
-
-        // 生成最终的汇总：all_responses，获取最终的页面状态(截图和描述)，internal: yes 表面这是给其他的agent进行展示，不是直接给用户【897-950】
-
-        Ok(())
+        Ok(responses)
     }
     
 
@@ -151,9 +325,9 @@ impl WebAgent {
         let mut history = self.chat_history.as_ref().unwrap().clone();
 
         let system_content = WEB_SURFER_SYSTEM_MESSAGE.replace("{date_today}", &date_today);
-        history.push(LLMMessage::System(SystemMessage {
-            content: system_content,
-        }));
+        history.push(LLMMessage::SystemMessage(
+            SystemMessage::new(system_content)
+        ));
 
         let screenshot = self.chrome_ctrl.as_ref().unwrap().get_screenshot(None).await?;
 
@@ -329,13 +503,14 @@ impl WebAgent {
         
         
         // 6.2 添加用户消息（文本提示 + 两张图片）
-        history.push(LLMMessage::User(UserMessage {
-            content: vec![
-                MessageContent::Text(text_prompt),
-                // MessageContent::Image(som_bytes),       // SOM 标注截图
-                // MessageContent::Image(screenshot_bytes), // 原始截图
-            ],
-        }));
+        history.push(LLMMessage::UserMessage(UserMessage::new(
+            UserContent::MultiModal(vec![
+                MultiModalContent::String(text_prompt),
+                // MultiModalContent::Image(screenshot_bytes),
+                // MultiModalContent::Image(som_bytes),
+            ]), 
+            self.name.clone(),
+        )));
 
         // println!("history: {:?}", history);
 
@@ -402,14 +577,13 @@ impl WebAgent {
                 let domain = if domain.is_empty() { url.clone() } else { domain };
 
                 let approved = if let Some(guard) = &self.action_guard {
-                    let request_msg = TextMessage {
-                        source: self.name.clone(),
-                        content: format!(
+                    let request_msg = TextMessage::new(
+                        format!(
                             "The website {} is not allowed. Would you like to allow the domain {} for this session?",
                             url, domain
                         ),
-                        metadata: HashMap::new(),
-                    };
+                        self.name.clone()
+                    );
                     guard.get_approval(request_msg).await
                 } else {
                     false
@@ -561,11 +735,10 @@ impl WebAgent {
         
         println!("🔧 工具调用: {}", tool_call_msg);
 
-        self.inner_messages.push(TextMessage {
-            content: tool_call_msg,
-            source: self.name.clone(),
-            metadata: HashMap::new(),
-        });
+        self.inner_messages.push(TextMessage::new(
+            tool_call_msg, 
+            self.name.clone()
+        ));
 
         // 5. 验证工具是否存在
         let available_tools: Vec<String> = tools.iter()
@@ -752,14 +925,20 @@ impl WebAgent {
         rects: &HashMap<String, InteractiveRegion>,
         element_id_mapping: &HashMap<String, String>,
     ) -> Result<String> {
+        // 支持 target_id 为字符串或数字
         let target_id = args
             .get("target_id")
-            .and_then(|v|v.as_str())
             .ok_or_else(|| anyhow!("'target_id' is required"))?;
+        
+        let target_id_str = match target_id {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => return Err(anyhow!("'target_id' must be a string or number")),
+        };
 
         let mapping_id = element_id_mapping
-            .get(target_id)
-            .ok_or_else(|| anyhow!("Target ID '{}' not found in mapping", target_id))?;
+            .get(&target_id_str)
+            .ok_or_else(|| anyhow!("Target ID '{}' not found in mapping", target_id_str))?;
 
         let target_name = self.target_name(mapping_id, rects);
         
@@ -796,14 +975,20 @@ impl WebAgent {
         rects: &HashMap<String, InteractiveRegion>,
         element_id_mapping: &HashMap<String, String>,
     ) -> Result<String> {
+        // 支持 target_id 为字符串或数字
         let target_id = args
             .get("target_id")
-            .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("'target_id' is required"))?;
+        
+        let target_id_str = match target_id {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => return Err(anyhow!("'target_id' must be a string or number")),
+        };
 
         let mapping_id = element_id_mapping
-            .get(target_id)
-            .ok_or_else(|| anyhow!("Target ID '{}' not found in mapping", target_id))?;
+            .get(&target_id_str)
+            .ok_or_else(|| anyhow!("Target ID '{}' not found in mapping", target_id_str))?;
         
         let target_name = self.target_name(mapping_id, &rects);
 
@@ -911,14 +1096,20 @@ impl WebAgent {
         rects: &HashMap<String, InteractiveRegion>,
         element_id_mapping: &HashMap<String, String>,
     ) -> Result<String> {
+        // 支持 target_id 为字符串或数字
         let target_id = args
             .get("target_id")
-            .and_then(|v|v.as_str())
             .ok_or_else(|| anyhow!("'target_id' is required"))?;
         
+        let target_id_str = match target_id {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => return Err(anyhow!("'target_id' must be a string or number")),
+        };
+        
         let mapping_id = element_id_mapping
-            .get(target_id)
-            .ok_or_else(|| anyhow!("Target ID '{}' not found in mapping", target_id))?;
+            .get(&target_id_str)
+            .ok_or_else(|| anyhow!("Target ID '{}' not found in mapping", target_id_str))?;
 
         let target_name = self.target_name(mapping_id, rects);
 
@@ -1069,9 +1260,7 @@ mod tests {
         
         // 3. 模拟用户输入：在 Google 搜索 grok
         if let Some(history) = agent.chat_history.as_mut() {
-            history.push(LLMMessage::User(UserMessage {
-                content: vec![MessageContent::Text("在谷歌搜索grok".to_string())],
-            }));
+            history.push(LLMMessage::UserMessage(UserMessage::new(UserContent::String("在谷歌搜索grok".to_string()), "User".to_string())));
         }
         
         println!("\n🤖 正在调用 LLM 获取响应...");
@@ -1143,5 +1332,38 @@ mod tests {
         Ok(())
     }
 
+    /// 测试 Bilibili 搜索并观看视频
+    /// 运行方式：cargo test test_bilibili_search_video -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore] // 需要浏览器和 API key，使用 cargo test -- --ignored 运行
+    async fn test_bilibili_search_video() -> Result<()> {
+        dotenv::dotenv().ok();
+
+        // 1. 创建并初始化 WebAgent
+        let mut agent = WebAgent::new().await;
+        agent.initialize().await?;
+        
+        println!("✅ WebAgent 初始化成功");
+        
+        // 2. 创建用户消息
+        let user_message = TextMessage::new(
+            "导航到www.bilibili.com，搜索小约翰可汗的视频并观看".to_string(),
+            "User".to_string()
+        );
+        
+        // 3. 调用 on_messages_steam 执行完整流程
+        let final_responses = agent.on_messages_steam(vec![ChatMessage::Text(user_message)]).await?;
+        
+        // 4. 打印最终结果
+        println!("\n{}", "=".repeat(80));
+        println!("🎉 任务完成！");
+        println!("📋 最终响应数量: {}", final_responses.len());
+        println!("{}", "=".repeat(80));
+        
+        // 5. 等待一段时间让用户查看结果
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        
+        Ok(())
+    }
 }
 

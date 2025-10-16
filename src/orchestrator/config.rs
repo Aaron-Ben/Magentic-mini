@@ -7,6 +7,7 @@ pub struct OrchestratorConfig {
     pub cooperative_planning: bool,
     pub autonomous_execution: bool,
     pub allow_follow_up_input: bool,
+    pub max_replans: usize,
     pub plan: Option<Plan>,
     pub max_turns: Option<usize>,
     pub allow_for_replans: bool,
