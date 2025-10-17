@@ -5,6 +5,31 @@ use std::fmt;
 use crate::types::plan::Plan;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Message {
+    pub from: String,
+    pub to: String,
+    pub chat_history: Vec<ChatMessage>,
+    pub msg_type: MessageType,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "type")]
+pub enum ChatMessage {
+    #[serde(rename = "TextMessage")]
+    Text(TextMessage),
+
+    #[serde(rename = "MultiModalMessage")]
+    MultiModal(MultiModalMessage),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "type")]
+pub enum MessageType {
+    Notify,
+    Execute,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FunctionCall {
     pub id: String,
     pub name: String,

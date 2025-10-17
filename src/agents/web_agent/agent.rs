@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
-use serde::Deserialize;
-use serde::Serialize;
+use async_trait::async_trait;
 use urlencoding::encode;
 use std::sync::Arc;
 use std::collections::HashSet;
@@ -12,15 +11,18 @@ use serde_json::Value;
 use serde_json::json;
 use tldextract::{TldExtractor, TldOption};
 use image::{imageops::FilterType};
+use crate::agents::agent::Agent;
 use crate::agents::web_agent::prompt::WEB_SURFER_SYSTEM_MESSAGE;
 use crate::agents::web_agent::set_of_mark::{PageState, add_set_of_mark};
 use crate::agents::web_agent::tool_define::DefaultTools;
 use crate::clients::{call_llm, LLMResponse};
+use crate::orchestrator::message::MessageType;
 use crate::orchestrator::message::AssistantContent;
 use crate::orchestrator::message::AssistantMessage;
+use crate::orchestrator::message::ChatMessage;
 use crate::orchestrator::message::FunctionCall;
+use crate::orchestrator::message::Message;
 use crate::orchestrator::message::MultiModalContent;
-use crate::orchestrator::message::MultiModalMessage;
 use crate::orchestrator::message::UserContent;
 use crate::orchestrator::message::LLMMessage;
 use crate::orchestrator::message::SystemMessage;
@@ -36,28 +38,11 @@ pub trait ActionGuard: Send + Sync + Debug{
     async fn get_approval(&self, request_msg: TextMessage) -> bool;
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(tag = "type")]
-pub enum ChatMessage {
-    #[serde(rename = "TextMessage")]
-    Text(TextMessage),
-
-    #[serde(rename = "MultiModalMessage")]
-    MultiModal(MultiModalMessage),
-}
-
 #[derive(Debug, Clone)]
 pub enum ContentItem {
     Text(String),
     Image(Vec<u8>),
 }
-
-#[derive(Debug, Clone)]
-pub struct Response {
-    pub chat_message: ChatMessage,
-    pub inner_messages: Option<Vec<String>>,
-}
-
 
 #[derive(Debug)]
 pub struct WebAgent {
@@ -88,6 +73,226 @@ impl Default for WebAgent {
 
 }
 
+#[async_trait]
+impl Agent for WebAgent {
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+    // web_agent的核心，接收用户或者orchestrator的消息，驱动浏览器进行一系列的操作，并将操作以流的形式（AsyncGenerator）逐步返回
+    async fn on_message_stream(
+        mut self,
+        messages: Message,
+    ) -> Result<Vec<ChatMessage>> {
+
+        match messages.msg_type {
+            MessageType::Notify => {
+
+            }
+
+            MessageType::Execute => {
+                let mut responses = Vec::new();
+        
+                // 1. 依据消息的类型，将消息添加到聊天历史中
+                // （多模态消息全部保留，文本消息只保留最后一条，为了避免历史消息进行影响）
+                let total = messages.len();
+                for (i, chat_message) in messages.into_iter().enumerate() {
+                    match chat_message {
+                        ChatMessage::Text(text_msg) => {
+                            if i == total - 1 {
+                                self.chat_history.as_mut().unwrap().push(
+                                    LLMMessage::UserMessage(
+                                        UserMessage::new(
+                                            UserContent::String(text_msg.base.content),
+                                            text_msg.base.base.source,
+                                        )
+                                    )
+                                );
+                            }
+                        }
+
+                        ChatMessage::MultiModal(multi_msg) => {
+                            self.chat_history.as_mut().unwrap().push(
+                                LLMMessage::UserMessage(
+                                    UserMessage::new(
+                                        UserContent::MultiModal(multi_msg.content),
+                                        multi_msg.base.source,
+                                    )
+                                )
+                            );
+                        }
+                    }
+                } 
+                
+                // 2.初始化一些变量
+                let mut observations = Vec::<String>::new();
+                let mut emited_responses = Vec::<String>::new();
+                let mut actions_proposed = Vec::<String>::new();
+                let mut action_results = Vec::<String>::new();
+                let mut all_screenshots = Vec::<Vec<u8>>::new();
+
+                let non_action_tools: HashSet<&str> = 
+                    vec!["stop_action", "answer_question"].into_iter().collect();
+                
+                let max_steps = 10; // 最大步骤数
+                
+                // 3. 主循环：从第0步到最大步骤之间的执行
+                for _step in 0..max_steps {
+                    
+                    // 3.1) 调用LLM，获取下一步要执行的动作
+                    let (llm_responses, rects, tools, element_id_mapping, _need_execute_tool) = 
+                        self.get_llm_response().await?;
+                    
+                    // 3.2) 如果不需要工具（思考或总结），输出文本响应并继续
+                    let title = self.chrome_ctrl.as_ref().unwrap().get_title().await?;
+                    let url = self.chrome_ctrl.as_ref().unwrap().get_url().await?;
+                    
+                    // 处理第一个 LLM 响应
+                    if let Some(first_response) = llm_responses.first() {
+                        match first_response {
+                            LLMResponse::Text(text) => {
+                                let summary = format!(
+                                    "On the webpage '{}', we propose the following action: {}",
+                                    title, text
+                                );
+
+                                // 将LLM的思考添加到历史中
+                                self.chat_history.as_mut().unwrap().push(
+                                    LLMMessage::AssistantMessage(AssistantMessage::new(
+                                        AssistantContent::String(summary.clone()),
+                                        None,
+                                        Some(self.name.clone()),
+                                    ))
+                                );
+
+                                emited_responses.push(text.clone());
+                                actions_proposed.push(summary);
+
+                                // 进行response
+
+                                break; // 终止循环
+                            }
+                            LLMResponse::FunctionCalls(function_calls) => {
+                                for action in function_calls {
+                                    let tool_call_name = action.name.clone();
+                                    let tool_call_msg = format!("'{} ({})'", action.name, 
+                                        serde_json::to_string(&serde_json::from_str::<Value>(&action.arguments).unwrap()).unwrap());
+                                    
+                                    let tool_call_explanation = serde_json::from_str::<serde_json::Value>(&action.arguments)
+                                        .ok()
+                                        .and_then(|v| v.get("explanation").and_then(|e| e.as_str()).map(|s| s.to_string()))
+                                        .unwrap_or_default();
+
+                                    actions_proposed.push(tool_call_msg.clone());
+                                    let action_context = format!("'{}' (at '{}')", title, url);
+                                    
+                                    self.chat_history.as_mut().unwrap().push(
+                                        LLMMessage::AssistantMessage(AssistantMessage::new(
+                                            AssistantContent::String(format!("On the webpage {}, we propose the following action: {}", action_context, tool_call_msg)),
+                                            None,
+                                            Some(self.name.clone())
+                                        ))
+                                    );
+
+                                    // 终止操作
+                                    if tool_call_name == "stop_action" {
+                                        let tool_call_answer = serde_json::from_str::<serde_json::Value>(&action.arguments)
+                                            .ok()
+                                            .and_then(|v| v.get("answer").and_then(|a| a.as_str()).map(|s| s.to_string()))
+                                            .unwrap_or_default();
+
+                                        observations.push(tool_call_answer.clone());
+                                        action_results.push(tool_call_answer.clone());
+                                        emited_responses.push(tool_call_answer);
+                                        // 返回response
+                                    }
+
+                                    // 普通操作
+                                    emited_responses.push(tool_call_explanation);
+                                    // 返回response
+
+                                    let action_result = self.execute_tool(vec![action.clone()], rects.clone(), tools.clone(), element_id_mapping.clone()).await?;
+                            
+                                    let new_screenshot = self.chrome_ctrl.as_ref().unwrap().get_screenshot(None).await?;
+                                    all_screenshots.push(new_screenshot.clone());
+
+                                    let _content_item = vec![
+                                        ContentItem::Text(action_result.clone()),
+                                        ContentItem::Image(new_screenshot.clone()),
+                                    ];
+
+                                    emited_responses.push(action_result.clone());
+
+                                    // response
+
+                                    let(message_content, _, _metadata_hash) = self
+                                        .chrome_ctrl.as_ref().unwrap().describe_page(false).await?;
+                                    
+                                    observations.push(format!("'{}' \n\n '{}'", action_result, message_content));
+                                    action_results.push(action_result.clone());
+
+                                    let observation_text = format!("Observation: {}\n\n{}", action_result, message_content);
+
+                                    let content = UserContent::MultiModal(vec![
+                                        MultiModalContent::String(observation_text),
+                                        MultiModalContent::Image(new_screenshot.clone()),
+                                    ]);
+
+                                    self.chat_history.as_mut().unwrap().push(
+                                        LLMMessage::UserMessage(UserMessage::new(
+                                            content,
+                                            self.name.clone()
+                                        ))
+                                    );
+
+                                    if non_action_tools.contains(tool_call_name.as_str()) {
+                                        break;
+                                    }
+                                }
+                            }
+                            LLMResponse::Error(err) => {
+                                eprintln!("LLM Error: {}", err);
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                let all_responses = format!(
+                    "The actions the websurfer performed are the following.\n{}",
+                    actions_proposed
+                        .iter()
+                        .zip(action_results.iter())
+                        .map(|(a, r)| format!("\n Action: {}\nObservation: {}\n\n", a, r))
+                        .collect::<Vec<_>>()
+                        .join("")
+                );
+
+                let (message_content, maybe_new_screenshot, metadata_hash) = self
+                    .chrome_ctrl.as_ref().unwrap().describe_page(true).await?;
+
+                self.prior_metadata_hash = Some(metadata_hash);
+
+                let message_content_final = format!("\n\n{}\n\n{}", all_responses, message_content);
+
+                let new_screenshot = maybe_new_screenshot.unwrap_or_else(Vec::new);
+
+                let _content = vec![
+                    MultiModalContent::String(message_content_final),
+                    MultiModalContent::Image(new_screenshot),
+                ];
+
+                
+                Ok(responses)
+            }
+        
+        }
+
+        
+    }
+    
+}
+
 impl WebAgent {
     pub async fn new() -> Self {
         Self::default()
@@ -103,208 +308,6 @@ impl WebAgent {
         self.chrome_ctrl.as_mut()
             .ok_or_else(|| anyhow!("Chrome context is not initialized. Call initialize() first."))
     }
-
-    // web_agent的核心，接收用户或者orchestrator的消息，驱动浏览器进行一系列的操作，并将操作以流的形式（AsyncGenerator）逐步返回
-    pub async fn on_messages_steam(
-        mut self,
-        messages: Vec<ChatMessage>,
-    ) -> Result<Vec<Response>> {
-
-        let mut responses = Vec::new();
-        
-        // 1. 依据消息的类型，将消息添加到聊天历史中
-        // （多模态消息全部保留，文本消息只保留最后一条，为了避免历史消息进行影响）
-        let total = messages.len();
-        for (i, chat_message) in messages.into_iter().enumerate() {
-            match chat_message {
-                ChatMessage::Text(text_msg) => {
-                    if i == total - 1 {
-                        self.chat_history.as_mut().unwrap().push(
-                            LLMMessage::UserMessage(
-                                UserMessage::new(
-                                    UserContent::String(text_msg.base.content),
-                                    text_msg.base.base.source,
-                                )
-                            )
-                        );
-                    }
-                }
-
-                ChatMessage::MultiModal(multi_msg) => {
-                    self.chat_history.as_mut().unwrap().push(
-                        LLMMessage::UserMessage(
-                            UserMessage::new(
-                                UserContent::MultiModal(multi_msg.content),
-                                multi_msg.base.source,
-                            )
-                        )
-                    );
-                }
-            }
-        } 
-        
-        // 2.初始化一些变量
-        let mut observations = Vec::<String>::new();
-        let mut emited_responses = Vec::<String>::new();
-        let mut actions_proposed = Vec::<String>::new();
-        let mut action_results = Vec::<String>::new();
-        let mut all_screenshots = Vec::<Vec<u8>>::new();
-
-        let non_action_tools: HashSet<&str> = 
-            vec!["stop_action", "answer_question"].into_iter().collect();
-        
-        let max_steps = 10; // 最大步骤数
-        
-        // 3. 主循环：从第0步到最大步骤之间的执行
-        for _step in 0..max_steps {
-            
-            // 3.1) 调用LLM，获取下一步要执行的动作
-            let (llm_responses, rects, tools, element_id_mapping, _need_execute_tool) = 
-                self.get_llm_response().await?;
-            
-            // 3.2) 如果不需要工具（思考或总结），输出文本响应并继续
-            let title = self.chrome_ctrl.as_ref().unwrap().get_title().await?;
-            let url = self.chrome_ctrl.as_ref().unwrap().get_url().await?;
-            
-            // 处理第一个 LLM 响应
-            if let Some(first_response) = llm_responses.first() {
-                match first_response {
-                    LLMResponse::Text(text) => {
-                        let summary = format!(
-                            "On the webpage '{}', we propose the following action: {}",
-                            title, text
-                        );
-
-                        // 将LLM的思考添加到历史中
-                        self.chat_history.as_mut().unwrap().push(
-                            LLMMessage::AssistantMessage(AssistantMessage::new(
-                                AssistantContent::String(summary.clone()),
-                                None,
-                                Some(self.name.clone()),
-                            ))
-                        );
-
-                        emited_responses.push(text.clone());
-                        actions_proposed.push(summary);
-
-                        // 进行response
-
-                        break; // 终止循环
-                    }
-                    LLMResponse::FunctionCalls(function_calls) => {
-                        for action in function_calls {
-                            let tool_call_name = action.name.clone();
-                            let tool_call_msg = format!("'{} ({})'", action.name, 
-                                serde_json::to_string(&serde_json::from_str::<Value>(&action.arguments).unwrap()).unwrap());
-                            
-                            let tool_call_explanation = serde_json::from_str::<serde_json::Value>(&action.arguments)
-                                .ok()
-                                .and_then(|v| v.get("explanation").and_then(|e| e.as_str()).map(|s| s.to_string()))
-                                .unwrap_or_default();
-
-                            actions_proposed.push(tool_call_msg.clone());
-                            let action_context = format!("'{}' (at '{}')", title, url);
-                            
-                            self.chat_history.as_mut().unwrap().push(
-                                LLMMessage::AssistantMessage(AssistantMessage::new(
-                                    AssistantContent::String(format!("On the webpage {}, we propose the following action: {}", action_context, tool_call_msg)),
-                                    None,
-                                    Some(self.name.clone())
-                                ))
-                            );
-
-                            // 终止操作
-                            if tool_call_name == "stop_action" {
-                                let tool_call_answer = serde_json::from_str::<serde_json::Value>(&action.arguments)
-                                    .ok()
-                                    .and_then(|v| v.get("answer").and_then(|a| a.as_str()).map(|s| s.to_string()))
-                                    .unwrap_or_default();
-
-                                observations.push(tool_call_answer.clone());
-                                action_results.push(tool_call_answer.clone());
-                                emited_responses.push(tool_call_answer);
-                                // 返回response
-                            }
-
-                            // 普通操作
-                            emited_responses.push(tool_call_explanation);
-                            // 返回response
-
-                            let action_result = self.execute_tool(vec![action.clone()], rects.clone(), tools.clone(), element_id_mapping.clone()).await?;
-                    
-                            let new_screenshot = self.chrome_ctrl.as_ref().unwrap().get_screenshot(None).await?;
-                            all_screenshots.push(new_screenshot.clone());
-
-                            let _content_item = vec![
-                                ContentItem::Text(action_result.clone()),
-                                ContentItem::Image(new_screenshot.clone()),
-                            ];
-
-                            emited_responses.push(action_result.clone());
-
-                            // response
-
-                            let(message_content, _, _metadata_hash) = self
-                                .chrome_ctrl.as_ref().unwrap().describe_page(false).await?;
-                            
-                            observations.push(format!("'{}' \n\n '{}'", action_result, message_content));
-                            action_results.push(action_result.clone());
-
-                            let observation_text = format!("Observation: {}\n\n{}", action_result, message_content);
-
-                            let content = UserContent::MultiModal(vec![
-                                MultiModalContent::String(observation_text),
-                                MultiModalContent::Image(new_screenshot.clone()),
-                            ]);
-
-                            self.chat_history.as_mut().unwrap().push(
-                                LLMMessage::UserMessage(UserMessage::new(
-                                    content,
-                                    self.name.clone()
-                                ))
-                            );
-
-                            if non_action_tools.contains(tool_call_name.as_str()) {
-                                break;
-                            }
-                        }
-                    }
-                    LLMResponse::Error(err) => {
-                        eprintln!("LLM Error: {}", err);
-                        break;
-                    }
-                }
-            }
-        }
-        
-        let all_responses = format!(
-            "The actions the websurfer performed are the following.\n{}",
-            actions_proposed
-                .iter()
-                .zip(action_results.iter())
-                .map(|(a, r)| format!("\n Action: {}\nObservation: {}\n\n", a, r))
-                .collect::<Vec<_>>()
-                .join("")
-        );
-
-        let (message_content, maybe_new_screenshot, metadata_hash) = self
-            .chrome_ctrl.as_ref().unwrap().describe_page(true).await?;
-
-        self.prior_metadata_hash = Some(metadata_hash);
-
-        let message_content_final = format!("\n\n{}\n\n{}", all_responses, message_content);
-
-        let new_screenshot = maybe_new_screenshot.unwrap_or_else(Vec::new);
-
-        let _content = vec![
-            MultiModalContent::String(message_content_final),
-            MultiModalContent::Image(new_screenshot),
-        ];
-
-        
-        Ok(responses)
-    }
-    
 
     /* 观察当前浏览器的状态，构造提示词，调用LLM，返回下一步要执行的动作（思考），以及上下文信息*/
     pub async fn get_llm_response(

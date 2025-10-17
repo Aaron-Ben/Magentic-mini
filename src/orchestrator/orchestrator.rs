@@ -1,24 +1,26 @@
 use chrono::Local;
+use futures::lock::Mutex;
+use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
+use crate::agents::Agent;
 use crate::orchestrator::config::OrchestratorConfig;
-use crate::orchestrator::message::{LLMMessage, TextMessage, UserMessage};
+use crate::orchestrator::message::{ChatMessage, LLMMessage, Message, MessageType, TextMessage, UserMessage};
 use crate::orchestrator::types::{OrchestratorState, ProgressLedger};
+use crate::types::plan::{Plan, PlanResponse};
 
 use anyhow::{bail, Ok, Result};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use async_channel::Sender;
+use std::sync::{Arc};
 
 
 #[derive(Debug)]
-pub struct Orchestrator<MessageType> {
+pub struct Orchestrator {
     // 基础字段
     pub name: String,
-    pub group_topic_type: String,           // 群聊的主题类型
-    pub output_topic_type: String,          // 输出的主题类型
-    pub participant_topic_types: Vec<String>,
+    pub agents: HashMap<String, Arc<Mutex<Box<dyn Agent>>>>,
+    pub chat_history: Vec<ChatMessage>,
     pub participant_descriptions: Vec<String>,
     pub participant_names: Vec<String>,
     pub termination_conditions: Vec<String>,
@@ -26,13 +28,10 @@ pub struct Orchestrator<MessageType> {
     pub termination_condition: Option<Box<dyn TerminationConditionTrait>>,
 
     // 特有字段
-    message: Box<dyn ChatMessage>,
-    output_message_queue: Arc<Mutex<Sender<MessageType>>>,
+    pub message: ChatMessage,
     model_context: Vec<LLMMessage>,         // 可能有误，暂时先这样
-    model_client: Arc<dyn ChatCompletionClient>,
+    model_client: Arc<dyn LLMClient>,
     config: OrchestratorConfig,
-    user_agent_topic: String,
-    web_agent_topic: String,
 
     // 内部状态字段
     state: OrchestratorState,
@@ -46,18 +45,14 @@ pub trait TerminationConditionTrait: Send + Sync {}
 
 type ValidateJsonFn = Arc<dyn Fn(&JsonValue) -> bool + Send + Sync>;
 
-impl <MessageType> Orchestrator<MessageType> {
+impl Orchestrator {
 
     pub async fn new(
         name: String,
-        group_topic_type: String,
-        output_topic_type: String,
-        message: Box<dyn ChatMessage>,
-        participant_topic_types: Vec<String>,
+        message: ChatMessage,
         participant_descriptions: Vec<String>,
         participant_names: Vec<String>,
-        output_message_queue: Arc<Mutex<async_channel::Sender<MessageType>>>,
-        model_client: Arc<dyn ChatCompletionClient>,
+        model_client: Arc<LLMClient>,
         config: OrchestratorConfig,
         termination_condition: Option<Box<dyn TerminationConditionTrait>>,
         max_turns: Option<i32>,
@@ -76,25 +71,17 @@ impl <MessageType> Orchestrator<MessageType> {
         // 初始化基础字段
         let mut orchestrator = Self {
             name,
-            group_topic_type,
-            output_topic_type,
-            participant_topic_types,
             participant_descriptions,
             participant_names,
             termination_conditions: Vec::new(),
             max_turns,
             termination_condition,
             message: message,
-            output_message_queue: output_message_queue,
             model_client: model_client,
             config: config,
-            user_agent_topic: user_agent_topic,
-            web_agent_topic: web_agent_topic,
             
             // 临时值，会在setup_internals中正确初始化
             state: OrchestratorState::default(),
-            agent_execution_names: Vec::new(),
-            agent_execution_descriptions: Vec::new(),
             team_description: String::new(),
             last_browser_metadata_hash: String::new(),
         };
@@ -142,13 +129,6 @@ impl <MessageType> Orchestrator<MessageType> {
         Ok(())
     }
 
-    async fn handle_agent_response(
-        &self,
-
-    ) -> Result<()> {
-        Ok(())
-    }
-
     async fn prepare_final_answer(
         &self,
         reason: String,
@@ -156,6 +136,41 @@ impl <MessageType> Orchestrator<MessageType> {
         force_stop: bool,
     ) -> Result<()> {
         Ok(())
+    }
+
+    pub async fn notify_all(&self, content: ChatMessage) -> Result<()> {
+        let notify_msg = Message {
+            from: "orchestrator".to_string(),
+            to: "all".to_string(),
+            chat_history: content.clone(),
+            msg_type: MessageType::Notify,
+        };
+
+        for(name, agent) in &self.agents {
+            let mut agent = agent.lock().await;
+            let _ = agent.on_message_stream(notify_msg.clone()).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn select_next_speaker(&self, agent_name: &str, content: ChatMessage) -> Result<ChatMessage> {
+        let execute_msg = Message {
+            from: "Orchestrator".to_string(),
+            to: agent_name.to_string(),
+            chat_history: content.clone(),
+            msg_type: MessageType::Execute,
+        };
+
+        let agent = self.agents.get(agent_name)
+            .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_name))?;
+        
+        let mut agent = agent.lock().await;
+        agent.on_message_stream(execute_msg).await?;
+    }
+
+    async fn handle_agent_response(&self, agent_name: &str, response: ChatMessage) -> Result<ChatMessage> {
+        self.chat_history.push(response.clone());
+        self.orchestrator_step().await?;
     }
 
     async fn orchestrator_step(
@@ -176,19 +191,61 @@ impl <MessageType> Orchestrator<MessageType> {
     ) -> Result<()> { 
 
         // Planning stage
+        let mut plan_response: PlanResponse = PlanResponse::default();
 
         // first planning
-
         if self.state.task.is_empty() && self.state.plan_str.is_empty() {
             self.state.task = "Task:".to_string();
-        } else {
 
+            let context = self.thread_to_context(None).await?;
+            context.push(LLMMessage::UserMessage(
+                UserMessage::new(
+                    self.get_task_ledger_plan_prompt(self.team_description),
+                    self.name.clone(),
+                ),
+            ));
+
+            plan_response = self.get_json_response(context, self.validate_plan_json);
+
+            self.state.plan = Plan::from_list_of_dicts_or_str(plan_response.steps);
+            self.state.plan_str = self.state.plan.as_ref().unwrap().to_string();
+
+            self.state.message_history.push(
+                TextMessage::new(plan_response.response, self.name.clone())
+            );
+        } else {
+            if 1 {
+                self.orchestrator_step_execution(true).await?;
+                return Ok(());
+            } else {
+                let user_plan = "";
+                if !user_plan.is_empty() {
+                    self.state.plan = Plan::from_list_of_dicts_or_str(user_plan);
+                    self.state.plan_str = user_plan.to_string();
+                }
+
+                let context = self.thread_to_context(None).await?;
+
+                context.push(LLMMessage::UserMessage(
+                    UserMessage::new(
+                        user_plan, 
+                        self.name.clone()
+                    )
+                ));
+
+                plan_response = self.get_json_response(context, self.validate_plan_json);
+
+            }
         }
 
-        Ok(())
+        if plan_response.needs_plan {
+            return Ok(());
+        } else {
+            self.select_next_speaker(&self.name, self.state.message_history.clone()).await?;
+            return Ok(());
+        }
     }
-
-
+    
     async fn orchestrator_step_execution(
         &mut self,
         first_step: bool,
@@ -220,7 +277,9 @@ impl <MessageType> Orchestrator<MessageType> {
             self.state.message_history.push(ledger_message);
         }
 
-        if self.state.current_step_idx >= self.state.plan.len() || self.state.n_rounds > self.config.max_turns {
+        let length = self.state.plan.as_ref().unwrap().len();
+
+        if self.state.current_step_idx >= length || self.state.n_rounds > self.config.max_turns {
             self.prepare_final_answer("Max rounds reached".to_string(), None, false).await?;
             return Ok(());
         }
@@ -245,7 +304,7 @@ impl <MessageType> Orchestrator<MessageType> {
 
         let json_str = self.get_json_response(context, self).await?;
 
-        let progress_ledger: ProgressLedger = serde_json::from_str(json_str).expect("Failed to parse JSON");
+        let progress_ledger: ProgressLedger = self.get_json_response(context, self.validate_progress_ledger_json).await?;
 
         if !first_step {
             let need_to_replan = progress_ledger.need_to_replan.answer;
@@ -287,10 +346,11 @@ impl <MessageType> Orchestrator<MessageType> {
         }
     }
 
-    async fn get_json_response(
+    async fn get_json_response<T: DeserializeOwned>(
         &mut self,
         messages: Vec<LLMMessage>,
-    ) -> Result<Vec<LLMMessage>> {
+        validate_json: ValidateJsonFn,
+    ) -> Result<T> {
 
         self.model_context.clear();
 
@@ -303,16 +363,8 @@ impl <MessageType> Orchestrator<MessageType> {
         Ok(response)
     }
 
-    async fn request_next_speaker(
-        &mut self,
-        next_speaker: &str,
-    ) -> Result<()> { 
-        Ok(())
-    }
-
-
     // 对话历史转为LLMMessage
-    fn thread_to_context(&self, message:Option<Vec<BaseChatMessage>>) -> Vec<LLMMessage> {
+    fn thread_to_context(&self, message:Option<Vec<ChatMessage>>) -> Result<Vec<LLMMessage>> {
 
         let chat_messages = message.unwrap_or(&self.state.message_history);
 
@@ -344,7 +396,7 @@ impl <MessageType> Orchestrator<MessageType> {
         // // 步骤 4: 返回最终构建完成的上下文
         // context_messages
 
-        Vec::new()
+        Ok(Vec::new())
 
     }
 
@@ -356,17 +408,6 @@ impl <MessageType> Orchestrator<MessageType> {
         // Store completed steps
 
 
-
-        Ok(())
-    }
-
-    async fn publish_group_chat_message(
-        self,
-        content: String,
-        cancellation_token: CancellationToken,
-        internal: bool,
-        metadata: Option<HashMap<String,String>>
-    ) -> Result<()> {
 
         Ok(())
     }
@@ -399,6 +440,11 @@ impl <MessageType> Orchestrator<MessageType> {
 
         let prompt = format!(
             r#"
+        Recall we are working on the following request:
+        {task}
+        This is our current plan:
+        {plan}
+
         We are at step index {step_index} in the plan which is 
         Title: {step_title}
         Details: {step_details}
@@ -465,9 +511,9 @@ impl <MessageType> Orchestrator<MessageType> {
             }
         }
 
-        let steps = match obj.get("steps").and_then(|v| v.as_array()) {
-            Some(s) => s,
-            None => return false, // "steps" is not an array
+        let steps = match obj.get("steps") {
+            Some(Value::Array(s)) => s,
+            _ => return false,
         };
 
         for step in steps {
@@ -476,11 +522,11 @@ impl <MessageType> Orchestrator<MessageType> {
                 None => return false,
             };
 
-            let keys = ["title", "details", "agent_name"];
-            for &key in &keys {
-                if !step_obj.contains_key(key) {
-                    return false;
-                }
+            if !step_obj.contains_key("title")
+                || !step_obj.contains_key("details")
+                || !step_obj.contains_key("agent_name")
+            {
+                return false;
             }
         }
         true
@@ -499,9 +545,59 @@ impl <MessageType> Orchestrator<MessageType> {
             step_details = self.state.plan[self.state.current_step_idx].details,
             agent_name = agent_name,
             instruction = instruction,
-            );
+        );
 
-            Ok(prompt)
-        }
+        Ok(prompt)
+    }
+
+    pub fn get_task_ledger_plan_prompt(&self, team: String) -> Result<String> {
+        let base_prompt = format!(
+            r#"
+            You have access to the following team members that can help you address the request each with unique expertise:
+            {team}
+            Remember, there is no requirement to involve all team members -- a team member's particular expertise may not be needed for this task.
+            When you answer without a plan and your answer includes factual information, make sure to say whether the answer was found using online search or from your own internal knowledge.
+            Your plan should be a sequence of steps that will complete the task."#,
+            team = team,
+        );
+
+        let step_types_section = r#"
+            Each step should have a title, details and agent_name fields.
+
+            The title should be a short one sentence description of the step.
+
+            The details should be a detailed description of the step. The details should be concise and directly describe the action to be taken.
+            The details should start with a brief recap of the title in one short sentence. We then follow it with a new line. We then add any additional details without repeating information from the title. We should be concise but mention all crucial details to allow the human to verify the step.
+            The details should not be longer that 2 sentences.
+
+            The agent_name should be the name of the agent that will execute the step. The agent_name should be one of the team members listed above.
+
+            Output an answer in pure JSON format according to the following schema. The JSON object must be parsable as-is. DO NOT OUTPUT ANYTHING OTHER THAN JSON, AND DO NOT DEVIATE FROM THIS SCHEMA:
+
+            The JSON object should have the following structure:
+
+            {
+                "response": "a complete response to the user request for Case 1.",
+                "task": "a complete description of the task requested by the user",
+                "plan_summary": "a complete summary of the plan if a plan is needed, otherwise an empty string",
+                "needs_plan": boolean,
+                "steps":
+                [
+                    {
+                        "title": "title of step 1",
+                        "details": "recap the title in one short sentence \n remaining details of step 1",
+                        "agent_name": "the name of the agent that should complete the step"
+                    },
+                    {
+                        "title": "title of step 2",
+                        "details": "recap the title in one short sentence \n remaining details of step 2",
+                        "agent_name": "the name of the agent that should complete the step"
+                    },
+                    ...
+                ]
+            }"#;
+
+        Ok(format!("{}\n\n{}", base_prompt.trim(), step_types_section.trim()))
+    }
 
 }

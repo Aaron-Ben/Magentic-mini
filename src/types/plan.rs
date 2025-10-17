@@ -14,6 +14,15 @@ pub struct PlanStep {
     pub agent_name: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PlanResponse {
+    pub task: String,
+    pub steps: Vec<PlanStep>,
+    pub needs_plan: bool,
+    pub response: String,
+    pub plan_summary: String,
+}
+
 impl Plan {
     pub fn from_list_of_dicts_or_str(plan_input: impl Into<Value>) -> Option<Self> {
         let mut value = plan_input.into();
