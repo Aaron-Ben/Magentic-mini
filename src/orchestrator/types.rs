@@ -1,4 +1,5 @@
-use crate::{orchestrator::message::BaseChatMessage, types::plan::Plan};
+use crate::orchestrator::message::ChatMessage;
+use crate::orchestrator::plan::Plan;
 use serde::{Serialize, Deserialize};
 
 // 维护群聊对话的状态
@@ -10,14 +11,13 @@ Orchestrator仅仅是编排逻辑的执行者，需要一个专门的状态管�
 pub struct OrchestratorState {
     pub task: String,                           // 当前任务的描述
     pub plan_str: String,                        
-    pub plan: Option<Plan>,                     // 执行的计划，plan设计的比较复杂
+    pub plan: Option<Plan>,                     // 执行的计划
     pub n_rounds: usize,                        // 执行的轮次
     pub current_step_idx: usize,                // 当前进行的步骤
     pub information_collected: String,          // 收集的信息
     pub in_planning_mode: bool,                 // 是否处于规划模式
     pub group_topic_type: String,               // 群聊的讨论主题
-    pub message_history: Vec<BaseChatMessage>,  // 完整的对话历史
-    pub participant_topic_types: Vec<String>,   // 参与者主题类型列表
+    pub message_history: Vec<ChatMessage>,      // 完整的对话历史
     pub n_replans: usize,                       // 重规划的次数
 }
 

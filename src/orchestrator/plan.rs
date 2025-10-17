@@ -24,6 +24,7 @@ pub struct PlanResponse {
 }
 
 impl Plan {
+
     pub fn from_list_of_dicts_or_str(plan_input: impl Into<Value>) -> Option<Self> {
         let mut value = plan_input.into();
 
@@ -78,4 +79,5 @@ impl Plan {
             None
         }
     }
+
 }

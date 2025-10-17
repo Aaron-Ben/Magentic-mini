@@ -2,7 +2,7 @@ use std::{collections::HashMap, str};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
-use crate::types::plan::Plan;
+use crate::orchestrator::plan::Plan;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Message {

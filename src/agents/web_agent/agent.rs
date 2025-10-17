@@ -81,22 +81,20 @@ impl Agent for WebAgent {
     }
     // web_agent的核心，接收用户或者orchestrator的消息，驱动浏览器进行一系列的操作，并将操作以流的形式（AsyncGenerator）逐步返回
     async fn on_message_stream(
-        mut self,
+        &mut self,
         messages: Message,
-    ) -> Result<Vec<ChatMessage>> {
+    ) -> Result<ChatMessage> {
 
         match messages.msg_type {
             MessageType::Notify => {
-
+                unimplemented!()
             }
 
             MessageType::Execute => {
-                let mut responses = Vec::new();
-        
                 // 1. 依据消息的类型，将消息添加到聊天历史中
                 // （多模态消息全部保留，文本消息只保留最后一条，为了避免历史消息进行影响）
-                let total = messages.len();
-                for (i, chat_message) in messages.into_iter().enumerate() {
+                let total = messages.chat_history.len();
+                for (i, chat_message) in messages.chat_history.into_iter().enumerate() {
                     match chat_message {
                         ChatMessage::Text(text_msg) => {
                             if i == total - 1 {
@@ -277,13 +275,23 @@ impl Agent for WebAgent {
 
                 let new_screenshot = maybe_new_screenshot.unwrap_or_else(Vec::new);
 
-                let _content = vec![
-                    MultiModalContent::String(message_content_final),
-                    MultiModalContent::Image(new_screenshot),
-                ];
+                // 构造最终的响应消息
+                let final_message = ChatMessage::MultiModal(
+                    crate::orchestrator::message::MultiModalMessage {
+                        base: crate::orchestrator::message::BaseChatMessage {
+                            source: self.name.clone(),
+                            metadata: HashMap::new(),
+                        },
+                        content: vec![
+                            MultiModalContent::String(message_content_final),
+                            MultiModalContent::Image(new_screenshot),
+                        ],
+                        message_type: "MultiModalMessage".to_string(),
+                    }
+                );
 
                 
-                Ok(responses)
+                Ok(final_message)
             }
         
         }
@@ -1355,12 +1363,16 @@ mod tests {
         );
         
         // 3. 调用 on_messages_steam 执行完整流程
-        let final_responses = agent.on_messages_steam(vec![ChatMessage::Text(user_message)]).await?;
+        let _final_responses = agent.on_message_stream(Message {
+            from: "User".to_string(),
+            to: "WebAgent".to_string(),
+            chat_history: vec![ChatMessage::Text(user_message)],
+            msg_type: MessageType::Execute,
+        }).await?;
         
         // 4. 打印最终结果
         println!("\n{}", "=".repeat(80));
         println!("🎉 任务完成！");
-        println!("📋 最终响应数量: {}", final_responses.len());
         println!("{}", "=".repeat(80));
         
         // 5. 等待一段时间让用户查看结果

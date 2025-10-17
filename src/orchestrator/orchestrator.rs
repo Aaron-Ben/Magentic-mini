@@ -3,14 +3,12 @@ use futures::lock::Mutex;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use serde_json::Value;
-use tokio_util::sync::CancellationToken;
 use crate::agents::Agent;
 use crate::orchestrator::config::OrchestratorConfig;
-use crate::orchestrator::message::{ChatMessage, LLMMessage, Message, MessageType, TextMessage, UserMessage};
+use crate::orchestrator::message::{ChatMessage, LLMMessage, Message, MessageType, SystemMessage, TextMessage, UserContent, UserMessage};
 use crate::orchestrator::types::{OrchestratorState, ProgressLedger};
-use crate::types::plan::{Plan, PlanResponse};
-
-use anyhow::{bail, Ok, Result};
+use crate::orchestrator::plan::{Plan, PlanResponse};
+use anyhow::{Ok, Result};
 use std::collections::HashMap;
 use std::sync::{Arc};
 
@@ -25,12 +23,11 @@ pub struct Orchestrator {
     pub participant_names: Vec<String>,
     pub termination_conditions: Vec<String>,
     pub max_turns: Option<i32>,
-    pub termination_condition: Option<Box<dyn TerminationConditionTrait>>,
 
     // 特有字段
     pub message: ChatMessage,
     model_context: Vec<LLMMessage>,         // 可能有误，暂时先这样
-    model_client: Arc<dyn LLMClient>,
+    model_client: Arc<LLMClient>,
     config: OrchestratorConfig,
 
     // 内部状态字段
@@ -61,13 +58,6 @@ impl Orchestrator {
         let user_agent_topic = "user_proxy".to_string();
         let web_agent_topic = "web_agent".to_string();
 
-        if !participant_names.contains(&user_agent_topic) {
-            if !(config.autonomous_execution && config.allow_follow_up_input) {
-                bail!("User agent topic {} not in participant names {:?}", 
-                      user_agent_topic, participant_names);
-            }
-        }
-
         // 初始化基础字段
         let mut orchestrator = Self {
             name,
@@ -75,8 +65,8 @@ impl Orchestrator {
             participant_names,
             termination_conditions: Vec::new(),
             max_turns,
-            termination_condition,
             message: message,
+            model_context: Vec::new(),
             model_client: model_client,
             config: config,
             
@@ -102,7 +92,7 @@ impl Orchestrator {
         if self.config.autonomous_execution {
             if let Some(user_index) = self.agent_execution_names
                 .iter()
-                .position(|name| name == &self.user_agent_topic) 
+                .position(|name| name == "user_proxy") 
             {
                 self.agent_execution_names.remove(user_index);
                 self.agent_execution_descriptions.remove(user_index);
@@ -130,11 +120,64 @@ impl Orchestrator {
     }
 
     async fn prepare_final_answer(
-        &self,
+        &mut self,
         reason: String,
         final_answer: Option<String>,
-        force_stop: bool,
     ) -> Result<()> {
+        if final_answer.is_none() {
+            let mut context = self.thread_to_context(None)?;
+            context.push(LLMMessage::UserMessage(
+                UserMessage::new(
+                    UserContent::String(reason),
+                    self.name.clone(),
+                ),
+            ));
+
+            let final_answer_prompt = format!(
+                r#"
+                We are working on the following task:
+                {task}
+                The above messages contain the steps that took place to complete the task.
+                Based on the information gathered, provide a final response to the user in response to the task.
+                Make sure the user can easily verify your answer, include links if there are any. 
+                Please refer to steps of the plan that was used to complete the task. Use the steps as a way to help the user verify your answer.
+                Make sure to also say whether the answer was found using online search or from your own knowledge.
+                There is no need to be verbose, but make sure it contains enough information for the user.
+                "#,
+                task = self.state.task.clone(),
+            );
+
+            let progress_summary = format!("Progress summary: {}", self.state.information_collected);
+
+            let content = format!("{}\n\n{}", progress_summary, final_answer_prompt);
+            context.push(LLMMessage::UserMessage(
+                UserMessage::new( 
+                    UserContent::String(content),
+                    self.name.clone(),
+                ),
+            ));
+
+            self.model_context.clear();
+            for message in context {
+                self.model_context.push(message.clone());
+            }
+
+            // 调用LLM
+            let response = "";
+            let _final_answer = Some(response);
+        }
+
+        let content = format!("Final answer: {}", final_answer.unwrap());
+        let message = ChatMessage::Text(TextMessage::new(
+            content,
+            self.name.clone(),
+        ));
+
+        self.state.message_history.push(message.clone());
+        self.notify_all(message).await?;
+
+        // 结束
+        // self.state.is_terminated = true;
         Ok(())
     }
 
@@ -142,39 +185,41 @@ impl Orchestrator {
         let notify_msg = Message {
             from: "orchestrator".to_string(),
             to: "all".to_string(),
-            chat_history: content.clone(),
+            chat_history: vec![content.clone()],
             msg_type: MessageType::Notify,
         };
 
-        for(name, agent) in &self.agents {
+        for(_name, agent) in &self.agents {
             let mut agent = agent.lock().await;
             let _ = agent.on_message_stream(notify_msg.clone()).await?;
         }
         Ok(())
     }
 
-    pub async fn select_next_speaker(&self, agent_name: &str, content: ChatMessage) -> Result<ChatMessage> {
+    pub async fn select_next_speaker(&self, agent_name: String, content: ChatMessage) -> Result<()> {
         let execute_msg = Message {
             from: "Orchestrator".to_string(),
             to: agent_name.to_string(),
-            chat_history: content.clone(),
+            chat_history: vec![content.clone()],
             msg_type: MessageType::Execute,
         };
 
-        let agent = self.agents.get(agent_name)
+        let agent = self.agents.get(&agent_name)
             .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_name))?;
         
         let mut agent = agent.lock().await;
         agent.on_message_stream(execute_msg).await?;
+        Ok(())
     }
 
-    async fn handle_agent_response(&self, agent_name: &str, response: ChatMessage) -> Result<ChatMessage> {
-        self.chat_history.push(response.clone());
+    async fn handle_agent_response(&mut self, _agent_name: &str, response: ChatMessage) -> Result<()> {
+        self.state.message_history.push(response.clone());
         self.orchestrator_step().await?;
+        Ok(())
     }
 
     async fn orchestrator_step(
-        &self,
+        &mut self,
     ) -> Result<()> { 
         
         if self.state.in_planning_mode {
@@ -197,10 +242,10 @@ impl Orchestrator {
         if self.state.task.is_empty() && self.state.plan_str.is_empty() {
             self.state.task = "Task:".to_string();
 
-            let context = self.thread_to_context(None).await?;
+            let mut context = self.thread_to_context(None)?;
             context.push(LLMMessage::UserMessage(
                 UserMessage::new(
-                    self.get_task_ledger_plan_prompt(self.team_description),
+                    UserContent::String(self.get_task_ledger_plan_prompt(self.team_description)?),
                     self.name.clone(),
                 ),
             ));
@@ -208,13 +253,18 @@ impl Orchestrator {
             plan_response = self.get_json_response(context, self.validate_plan_json);
 
             self.state.plan = Plan::from_list_of_dicts_or_str(plan_response.steps);
-            self.state.plan_str = self.state.plan.as_ref().unwrap().to_string();
+            self.state.plan_str = serde_json::to_string(&self.state.plan.as_ref().unwrap())?;
 
             self.state.message_history.push(
-                TextMessage::new(plan_response.response, self.name.clone())
+                ChatMessage::Text(
+                    TextMessage::new(
+                        plan_response.response,
+                         self.name.clone()
+                        )
+                    )
             );
         } else {
-            if 1 {
+            if true {
                 self.orchestrator_step_execution(true).await?;
                 return Ok(());
             } else {
@@ -224,11 +274,11 @@ impl Orchestrator {
                     self.state.plan_str = user_plan.to_string();
                 }
 
-                let context = self.thread_to_context(None).await?;
+                let mut context = self.thread_to_context(None)?;
 
                 context.push(LLMMessage::UserMessage(
                     UserMessage::new(
-                        user_plan, 
+                        UserContent::String(user_plan.to_string()), 
                         self.name.clone()
                     )
                 ));
@@ -241,7 +291,11 @@ impl Orchestrator {
         if plan_response.needs_plan {
             return Ok(());
         } else {
-            self.select_next_speaker(&self.name, self.state.message_history.clone()).await?;
+            self.select_next_speaker(
+                &self.name,
+                
+                self.state.message_history.clone()
+            ).await?;
             return Ok(());
         }
     }
@@ -272,33 +326,38 @@ impl Orchestrator {
                 plan = self.state.plan_str.clone(),
             );
 
-            let ledger_message = TextMessage::new(content, self.name.clone());
+            let ledger_message = ChatMessage::Text(TextMessage::new(content, self.name.clone()));
 
-            self.state.message_history.push(ledger_message);
+            self.state.message_history.push(ledger_message.clone());
         }
 
-        let length = self.state.plan.as_ref().unwrap().len();
+        let length = if let Some(plan) = &self.state.plan {
+            plan.steps.len()
+        } else {
+            0
+        };
 
-        if self.state.current_step_idx >= length || self.state.n_rounds > self.config.max_turns {
-            self.prepare_final_answer("Max rounds reached".to_string(), None, false).await?;
+        let max_turns = self.config.max_turns.unwrap_or(100) as usize;
+        if self.state.current_step_idx >= length || self.state.n_rounds > max_turns {
+            self.prepare_final_answer("Max rounds reached".to_string(), None).await?;
             return Ok(());
         }
 
         self.state.n_rounds += 1;
-        let context = self.thread_to_context(None);
+        let mut context = self.thread_to_context(None)?;
 
         
         let progress_ledger_prompt = self.get_progress_ledger_prompt(
-            self.state.task.clone(),
+            self.state.task,
             self.state.plan_str.clone(),
             self.state.current_step_idx,
-            self.team_description.clone(),
-            self.agent_execution_names.clone(),
-        );
+            self.team_description,
+            self.agent_execution_names,
+        )?;
 
         context.push(LLMMessage::UserMessage(
             UserMessage::new(
-                progress_ledger_prompt, self.name.clone()
+                UserContent::String(progress_ledger_prompt), self.name.clone()
             ),
         ));
 
@@ -317,7 +376,7 @@ impl Orchestrator {
                     return Ok(());
                 } else {
                     let reason = format!("We need to replan but max replan attempts reached: {replan_reason} ");
-                    self.prepare_final_answer(reason.to_string(), None,None).await?;
+                    self.prepare_final_answer(reason, None).await?;
                     return Ok(());
                 }
             }
@@ -327,23 +386,36 @@ impl Orchestrator {
             }
         }
 
-        if self.state.current_step_idx >= self.state.plan {
-            self.prepare_final_answer("Plan completed".to_string(), None, false).await?;
+        let plan_length = if let Some(plan) = &self.state.plan {
+            plan.steps.len()
+        } else {
+            0
+        };
+
+        if self.state.current_step_idx >= plan_length {
+            self.prepare_final_answer("Plan completed".to_string(), None).await?;
             return Ok(());
         }
 
-        let new_instruction = self.get_agent_instruction(instruction, agent_name);
+        let new_instruction = self.get_agent_instruction(
+            progress_ledger.instruction_or_question.answer.clone(),
+            progress_ledger.instruction_or_question.agent_name.clone()
+        )?;
 
-        message_to_send = TextMessage::new(new_instruction, self.name, {"internal": true});
+        let message_to_send = ChatMessage::Text(TextMessage::new(
+            new_instruction, 
+            self.name.clone()
+        ));
         self.state.message_history.push(message_to_send);
 
         let next_speaker = progress_ledger.instruction_or_question.agent_name;
         for name in self.agent_execution_names {
             if name == next_speaker {
-                self.request_next_speaker(next_speaker).await?;
+                self.select_next_speaker(next_speaker).await?;
                 break;
             }
         }
+        Ok(())
     }
 
     async fn get_json_response<T: DeserializeOwned>(
@@ -359,8 +431,9 @@ impl Orchestrator {
         }
 
         // llm_call 这里调用使用model_client，这里应该是LLM使用我们的prompt，给出xxx，暂时结构位置
-        let response = Vec<messages>;
-        Ok(response)
+        // let response = Vec<messages>;
+        // Ok(response)
+        Ok(T::default())
     }
 
     // 对话历史转为LLMMessage
@@ -374,12 +447,12 @@ impl Orchestrator {
         if self.state.in_planning_mode {
             let planning_prompt = format!("This is a planning step. The task is: {}", self.state.task);
             context_messages.push(LLMMessage::SystemMessage(
-                planning_prompt,
+                SystemMessage::new(planning_prompt),
             ));
         } else {
             let execution_prompt = format!("This is a execution step. The task is: {}", self.state.task);
             context_messages.push(LLMMessage::SystemMessage(
-                execution_prompt,
+                SystemMessage::new(execution_prompt),
             ));
         }
 
@@ -390,25 +463,97 @@ impl Orchestrator {
         //     is_multimodal,
         // );
 
-        // // 将转换后的历史记录追加到上下文中
+        // 将转换后的历史记录追加到上下文中
         // context_messages.extend(converted_history);
 
-        // // 步骤 4: 返回最终构建完成的上下文
+        // 步骤 4: 返回最终构建完成的上下文
         // context_messages
 
         Ok(Vec::new())
 
     }
 
-    async fn replan(&self,reason:String,cancellation_token: CancellationToken) -> Result<()> {
+    async fn replan(&self,reason:String) -> Result<()> {
         self.state.in_planning_mode = true;
 
-        let context = self.thread_to_context(None);
+        let context = self.thread_to_context(None)?;
 
-        // Store completed steps
+        let completed_steps = if let Some(ref plan) = self.state.plan {
+            &plan.steps[..self.state.current_step_idx]
+        } else {
+            &[]
+        };
 
+        completed_steps
+            .iter()
+            .enumerate()
+            .map(|(i,step)| -> String {
+                format!(
+                    "COMPLETED STEP {}: title=\"{}\", details=\"{}\", agent=\"{}\"",
+                    i + 1,
+                    step.title,
+                    step.details,
+                    step.agent_name
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
+        let replan_prompt = self.get_task_ledger_replan_prompt(self.team_description.clone(), self.state.task.clone(), self.state.plan_str.clone())?;
 
+        context.push(LLMMessage::UserMessage(
+            UserMessage::new(
+                UserContent::String(replan_prompt), 
+                self.name.clone()
+            )
+        ));
+
+        let plan_response: PlanResponse = self.get_json_response(context, self.validate_plan_json);
+
+        let new_plan = if plan_response.steps.is_empty() {
+            None
+        } else {
+            Some(Plan {
+                task: Some(plan_response.task),
+                steps: plan_response.steps,
+            })
+        };
+
+        let combined_steps = if let Some(plan) = new_plan {
+            [completed_steps, &plan.steps].concat().to_vec()
+        } else {
+            completed_steps
+        };
+
+        let new_plan_obj = Plan {
+            task: self.state.task.clone(),
+            steps: combined_steps,
+        };
+
+        let json_str = serde_json::to_string(&new_plan_obj)?;
+
+        self.state.plan_str = json_str;
+        self.state.plan = Some(new_plan_obj);
+
+        let plan_summary = plan_response
+            .get("plan_summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let updated_summary = format!("Replanning: {}",plan_summary);
+
+        plan_response.plan_summary = updated_summary;
+
+        let json_string = serde_json::to_string(&plan_response)?;
+
+        self.notify_all(ChatMessage::Text(
+            TextMessage::new(
+                json_string, 
+                self.name.clone())
+            )).await?;
+        
+        // 操作交给用户
+        self.select_next_speaker(&self.name, ChatMessage::Text(TextMessage::new(json_string, self.name.clone()))).await?;
         Ok(())
     }
 
@@ -420,21 +565,14 @@ impl Orchestrator {
         team: String,
         names: Vec<String>,
     ) -> Result<String> {
-        let plan_steps = self
-            .state
-            .plan
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Plan must be initialized"))?;
 
-        if step_index >= plan_steps.len() {
-            return Err(anyhow::anyhow!(
-                "step_index {} is out of bounds (plan has {} steps)",
-                step_index,
-                plan_steps.len()
-            ));
-        }
+        let step = if let Some(plan) = &self.state.plan {
+            &plan.steps[step_index]
+        } else {
+            return Err(anyhow::anyhow!("Plan must be initialized"));
+        };
 
-        let step = &plan_steps[step_index];
+
         let names_str = names.join(", ");
         let additional_instructions = String::new();
 
@@ -533,6 +671,13 @@ impl Orchestrator {
     }
 
     pub fn get_agent_instruction(&self, instruction: String, agent_name: String) -> Result<String> {
+        
+        let steps = if let Some(plan) = &self.state.plan {
+            &plan.steps
+        } else {
+            return Err(anyhow::anyhow!("Plan must be initialized"));
+        };
+        
         let prompt = format!(
             r#"    Step {step_index}: {step_title}
             \\n\\n
@@ -541,8 +686,8 @@ impl Orchestrator {
             Instruction for {agent_name}: {instruction}
             "#,
             step_index = self.state.current_step_idx + 1,
-            step_title = self.state.plan[self.state.current_step_idx].title,
-            step_details = self.state.plan[self.state.current_step_idx].details,
+            step_title = steps[self.state.current_step_idx].title,
+            step_details = steps[self.state.current_step_idx].details,
             agent_name = agent_name,
             instruction = instruction,
         );
@@ -598,6 +743,21 @@ impl Orchestrator {
             }"#;
 
         Ok(format!("{}\n\n{}", base_prompt.trim(), step_types_section.trim()))
+    }
+
+    pub fn get_task_ledger_replan_prompt(&self, team: String,task: String, current_plan: String) -> Result<String> {
+        let replan_intro = format!(r#"
+            The task we are trying to complete is:
+            {}
+            The plan we have tried to complete is:
+            {}
+            We have not been able to make progress on our task.
+            We need to find a new plan to tackle the task that addresses the failures in trying to complete the task previously."#,
+            task, current_plan
+        );
+
+        let base_plan_prompt = self.get_task_ledger_plan_prompt(team)?;
+        Ok(format!("{}\n\n{}", replan_intro, base_plan_prompt))
     }
 
 }

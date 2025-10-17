@@ -1,6 +1,5 @@
 use serde::{Serialize, Deserialize};
-use crate::types::plan::Plan;
-
+use crate::orchestrator::plan::Plan;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestratorConfig {
