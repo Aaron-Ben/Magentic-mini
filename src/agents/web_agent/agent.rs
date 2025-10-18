@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use async_trait::async_trait;
 use urlencoding::encode;
-use std::sync::Arc;
 use std::collections::HashSet;
 use regex::Regex;
 use chrono::Utc;
@@ -16,6 +15,7 @@ use crate::agents::web_agent::prompt::WEB_SURFER_SYSTEM_MESSAGE;
 use crate::agents::web_agent::set_of_mark::{PageState, add_set_of_mark};
 use crate::agents::web_agent::tool_define::DefaultTools;
 use crate::clients::{call_llm, LLMResponse};
+use crate::orchestrator::message::MessageRole;
 use crate::orchestrator::message::MessageType;
 use crate::orchestrator::message::AssistantContent;
 use crate::orchestrator::message::AssistantMessage;
@@ -26,17 +26,11 @@ use crate::orchestrator::message::MultiModalContent;
 use crate::orchestrator::message::UserContent;
 use crate::orchestrator::message::LLMMessage;
 use crate::orchestrator::message::SystemMessage;
-use crate::orchestrator::message::TextMessage;
 use crate::orchestrator::message::UserMessage;
 use crate::tools::chrome::chrome_ctrl::Chrome;
 use crate::tools::chrome::types::InteractiveRegion;
 use crate::tools::tool_metadata::ToolSchema;
-use crate::tools::url_status_manager::{UrlStatus, UrlStatusManager};
-
-#[async_trait::async_trait]
-pub trait ActionGuard: Send + Sync + Debug{
-    async fn get_approval(&self, request_msg: TextMessage) -> bool;
-}
+use crate::tools::url_status_manager::UrlStatusManager;
 
 #[derive(Debug, Clone)]
 pub enum ContentItem {
@@ -48,11 +42,9 @@ pub enum ContentItem {
 pub struct WebAgent {
     chrome_ctrl: Option<Chrome>,
     chat_history: Option<Vec<LLMMessage>>,
-    inner_messages: Vec<TextMessage>,
     prior_metadata_hash: Option<String>,
     url_status_manager: UrlStatusManager,
     last_rejected_url: Option<String>,
-    action_guard: Option<Arc<dyn ActionGuard>>,     // 安全在多线程环境中使用，指出任意实现 ActionGuard trait 的类型
     name: String,
 }
 
@@ -62,11 +54,9 @@ impl Default for WebAgent {
         Self {
             chrome_ctrl: None,
             chat_history: Some(Vec::new()),
-            inner_messages: Vec::new(),
             prior_metadata_hash: None,
             url_status_manager: UrlStatusManager::new(None, None),
             last_rejected_url: None,
-            action_guard: None,
             name: "WebAgent".to_string(),
         }
     }
@@ -96,25 +86,24 @@ impl Agent for WebAgent {
                 let total = messages.chat_history.len();
                 for (i, chat_message) in messages.chat_history.into_iter().enumerate() {
                     match chat_message {
-                        ChatMessage::Text(text_msg) => {
+                        ChatMessage::Text { role, source, content, metadata } => {
                             if i == total - 1 {
                                 self.chat_history.as_mut().unwrap().push(
-                                    LLMMessage::UserMessage(
+                                    LLMMessage::User(
                                         UserMessage::new(
-                                            UserContent::String(text_msg.base.content),
-                                            text_msg.base.base.source,
+                                            UserContent::String(content), 
+                                            source,
                                         )
                                     )
                                 );
                             }
-                        }
-
-                        ChatMessage::MultiModal(multi_msg) => {
+                        },
+                        ChatMessage::MultiModal { role, source, content, .. } => {
                             self.chat_history.as_mut().unwrap().push(
-                                LLMMessage::UserMessage(
+                                LLMMessage::User(
                                     UserMessage::new(
-                                        UserContent::MultiModal(multi_msg.content),
-                                        multi_msg.base.source,
+                                        UserContent::MultiModal(content),
+                                        source,
                                     )
                                 )
                             );
@@ -156,9 +145,8 @@ impl Agent for WebAgent {
 
                                 // 将LLM的思考添加到历史中
                                 self.chat_history.as_mut().unwrap().push(
-                                    LLMMessage::AssistantMessage(AssistantMessage::new(
+                                    LLMMessage::Assistant(AssistantMessage::new(
                                         AssistantContent::String(summary.clone()),
-                                        None,
                                         Some(self.name.clone()),
                                     ))
                                 );
@@ -185,9 +173,8 @@ impl Agent for WebAgent {
                                     let action_context = format!("'{}' (at '{}')", title, url);
                                     
                                     self.chat_history.as_mut().unwrap().push(
-                                        LLMMessage::AssistantMessage(AssistantMessage::new(
+                                        LLMMessage::Assistant(AssistantMessage::new(
                                             AssistantContent::String(format!("On the webpage {}, we propose the following action: {}", action_context, tool_call_msg)),
-                                            None,
                                             Some(self.name.clone())
                                         ))
                                     );
@@ -232,12 +219,12 @@ impl Agent for WebAgent {
                                     let observation_text = format!("Observation: {}\n\n{}", action_result, message_content);
 
                                     let content = UserContent::MultiModal(vec![
-                                        MultiModalContent::String(observation_text),
+                                        MultiModalContent::Text(observation_text),
                                         MultiModalContent::Image(new_screenshot.clone()),
                                     ]);
 
                                     self.chat_history.as_mut().unwrap().push(
-                                        LLMMessage::UserMessage(UserMessage::new(
+                                        LLMMessage::User(UserMessage::new(
                                             content,
                                             self.name.clone()
                                         ))
@@ -276,19 +263,15 @@ impl Agent for WebAgent {
                 let new_screenshot = maybe_new_screenshot.unwrap_or_else(Vec::new);
 
                 // 构造最终的响应消息
-                let final_message = ChatMessage::MultiModal(
-                    crate::orchestrator::message::MultiModalMessage {
-                        base: crate::orchestrator::message::BaseChatMessage {
-                            source: self.name.clone(),
-                            metadata: HashMap::new(),
-                        },
-                        content: vec![
-                            MultiModalContent::String(message_content_final),
-                            MultiModalContent::Image(new_screenshot),
-                        ],
-                        message_type: "MultiModalMessage".to_string(),
-                    }
-                );
+                let final_message = ChatMessage::MultiModal {
+                    role: MessageRole::Assistant,
+                    source: self.name.clone(),
+                    content: vec![
+                        MultiModalContent::Text(message_content_final),
+                        MultiModalContent::Image(new_screenshot),
+                    ],
+                    metadata: HashMap::new(),
+                };
 
                 
                 Ok(final_message)
@@ -336,7 +319,7 @@ impl WebAgent {
         let mut history = self.chat_history.as_ref().unwrap().clone();
 
         let system_content = WEB_SURFER_SYSTEM_MESSAGE.replace("{date_today}", &date_today);
-        history.push(LLMMessage::SystemMessage(
+        history.push(LLMMessage::System(
             SystemMessage::new(system_content)
         ));
 
@@ -514,9 +497,9 @@ impl WebAgent {
         
         
         // 6.2 添加用户消息（文本提示 + 两张图片）
-        history.push(LLMMessage::UserMessage(UserMessage::new(
+        history.push(LLMMessage::User(UserMessage::new(
             UserContent::MultiModal(vec![
-                MultiModalContent::String(text_prompt),
+                MultiModalContent::Text(text_prompt),
                 // MultiModalContent::Image(screenshot_bytes),
                 // MultiModalContent::Image(som_bytes),
             ]), 
@@ -550,6 +533,7 @@ impl WebAgent {
         Ok((page_state, rects))
     }
 
+    
     pub async fn check_url_and_generate_msg(&mut self, url: String) -> Result<(String,bool)> {
         // 特殊处理 chrome-error界面
         if url == "chrome-error://chromewebdata/" {
@@ -587,13 +571,15 @@ impl WebAgent {
                 };
                 let domain = if domain.is_empty() { url.clone() } else { domain };
 
+                /*
                 let approved = if let Some(guard) = &self.action_guard {
-                    let request_msg = TextMessage::new(
+                    let request_msg = ChatMessage::new_text(
+                        MessageRole::User,
+                        self.name.clone(),
                         format!(
                             "The website {} is not allowed. Would you like to allow the domain {} for this session?",
                             url, domain
                         ),
-                        self.name.clone()
                     );
                     guard.get_approval(request_msg).await
                 } else {
@@ -606,6 +592,7 @@ impl WebAgent {
                 } else {
                     self.url_status_manager.set_url_status(&domain, UrlStatus::Rejected);
                 }
+                */
             }
 
             // 记录最后被拒绝的 URL
@@ -745,11 +732,6 @@ impl WebAgent {
         let tool_call_msg = format!("{}({})", name, serde_json::to_string(&args)?);
         
         println!("🔧 工具调用: {}", tool_call_msg);
-
-        self.inner_messages.push(TextMessage::new(
-            tool_call_msg, 
-            self.name.clone()
-        ));
 
         // 5. 验证工具是否存在
         let available_tools: Vec<String> = tools.iter()
@@ -1271,7 +1253,7 @@ mod tests {
         
         // 3. 模拟用户输入：在 Google 搜索 grok
         if let Some(history) = agent.chat_history.as_mut() {
-            history.push(LLMMessage::UserMessage(UserMessage::new(UserContent::String("在谷歌搜索grok".to_string()), "User".to_string())));
+            history.push(LLMMessage::User(UserMessage::new(UserContent::String("在谷歌搜索grok".to_string()), "User".to_string())));
         }
         
         println!("\n🤖 正在调用 LLM 获取响应...");
@@ -1357,16 +1339,17 @@ mod tests {
         println!("✅ WebAgent 初始化成功");
         
         // 2. 创建用户消息
-        let user_message = TextMessage::new(
-            "导航到www.bilibili.com，搜索小约翰可汗的视频并观看".to_string(),
-            "User".to_string()
+        let user_message = ChatMessage::new_text(
+            MessageRole::User,
+            "User".to_string(),
+            "导航到www.bilibili.com，搜索小约翰可汗".to_string()
         );
         
         // 3. 调用 on_messages_steam 执行完整流程
         let _final_responses = agent.on_message_stream(Message {
             from: "User".to_string(),
             to: "WebAgent".to_string(),
-            chat_history: vec![ChatMessage::Text(user_message)],
+            chat_history: vec![user_message],
             msg_type: MessageType::Execute,
         }).await?;
         

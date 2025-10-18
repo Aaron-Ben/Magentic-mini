@@ -58,7 +58,7 @@ pub async fn call_llm(
     
     for msg in history {
         match msg {
-            LLMMessage::SystemMessage(sys_msg) => {
+            LLMMessage::System(sys_msg) => {
                 api_messages.push(ChatCompletionRequestMessage::System(
                     ChatCompletionRequestSystemMessage {
                         content: sys_msg.content.clone(),
@@ -66,7 +66,7 @@ pub async fn call_llm(
                     }
                 ));
             }
-            LLMMessage::UserMessage(user_msg) => {
+            LLMMessage::User(user_msg) => {
                 let mut content_parts = Vec::new();
                 
                 match &user_msg.content {
@@ -84,7 +84,7 @@ pub async fn call_llm(
                         // 多模态消息
                         for content in contents {
                             match content {
-                                MultiModalContent::String(text) => {
+                                MultiModalContent::Text(text) => {
                                     content_parts.push(
                                         async_openai::types::ChatCompletionRequestMessageContentPart::Text(
                                             async_openai::types::ChatCompletionRequestMessageContentPartText {
@@ -121,7 +121,7 @@ pub async fn call_llm(
                     }
                 ));
             }
-            LLMMessage::AssistantMessage(asst_msg) => {
+            LLMMessage::Assistant(asst_msg) => {
                 let content_str = match &asst_msg.content {
                     AssistantContent::String(s) => Some(s.clone()),
                     AssistantContent::FunctionCalls(_) => None,
@@ -137,7 +137,7 @@ pub async fn call_llm(
                     }
                 ));
             }
-            LLMMessage::FunctionExecutionResultMessage(_func_result) => {
+            LLMMessage::Tool(_func_result) => {
                 // TODO: 处理函数执行结果消息
                 // 暂时跳过
             }

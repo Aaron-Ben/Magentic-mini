@@ -5,7 +5,7 @@ use serde_json::Value as JsonValue;
 use serde_json::Value;
 use crate::agents::Agent;
 use crate::orchestrator::config::OrchestratorConfig;
-use crate::orchestrator::message::{ChatMessage, LLMMessage, Message, MessageType, SystemMessage, TextMessage, UserContent, UserMessage};
+use crate::orchestrator::message::{ChatMessage, LLMMessage, Message, MessageRole, MessageType, SystemMessage, UserContent, UserMessage, chat_history_to_llm_messages};
 use crate::orchestrator::types::{OrchestratorState, ProgressLedger};
 use crate::orchestrator::plan::{Plan, PlanResponse};
 use anyhow::{Ok, Result};
@@ -126,7 +126,7 @@ impl Orchestrator {
     ) -> Result<()> {
         if final_answer.is_none() {
             let mut context = self.thread_to_context(None)?;
-            context.push(LLMMessage::UserMessage(
+            context.push(LLMMessage::User(
                 UserMessage::new(
                     UserContent::String(reason),
                     self.name.clone(),
@@ -150,7 +150,7 @@ impl Orchestrator {
             let progress_summary = format!("Progress summary: {}", self.state.information_collected);
 
             let content = format!("{}\n\n{}", progress_summary, final_answer_prompt);
-            context.push(LLMMessage::UserMessage(
+            context.push(LLMMessage::User(
                 UserMessage::new( 
                     UserContent::String(content),
                     self.name.clone(),
@@ -168,10 +168,11 @@ impl Orchestrator {
         }
 
         let content = format!("Final answer: {}", final_answer.unwrap());
-        let message = ChatMessage::Text(TextMessage::new(
-            content,
+        let message = ChatMessage::new_text(
+            MessageRole::Assistant,
             self.name.clone(),
-        ));
+            content,
+        );
 
         self.state.message_history.push(message.clone());
         self.notify_all(message).await?;
@@ -214,20 +215,7 @@ impl Orchestrator {
 
     async fn handle_agent_response(&mut self, _agent_name: &str, response: ChatMessage) -> Result<()> {
         self.state.message_history.push(response.clone());
-        self.orchestrator_step().await?;
-        Ok(())
-    }
-
-    async fn orchestrator_step(
-        &mut self,
-    ) -> Result<()> { 
-        
-        if self.state.in_planning_mode {
-            self.orchestrator_step_planning().await?;
-        } else {
-            self.orchestrator_step_execution(false).await?;
-        }
-
+        // self.orchestrator_step_execution(false).await?;
         Ok(())
     }
 
@@ -238,68 +226,52 @@ impl Orchestrator {
         // Planning stage
         let mut plan_response: PlanResponse = PlanResponse::default();
 
-        // first planning
-        if self.state.task.is_empty() && self.state.plan_str.is_empty() {
-            self.state.task = "Task:".to_string();
+        let mut context = self.thread_to_context(None)?;
+        context.push(LLMMessage::User(
+            UserMessage::new(
+                UserContent::String(self.get_task_ledger_plan_prompt(self.team_description)?),
+                self.name.clone(),
+            ),
+        ));
+
+        let plan_response = self.model_client.call(context).await?;
+
+        self.state.plan = Plan::from_list_of_dicts_or_str(plan_response.steps);
+        self.state.plan_str = serde_json::to_string(&self.state.plan.as_ref().unwrap())?;
+
+        self.state.message_history.push(
+            ChatMessage::new_text(
+                MessageRole::Assistant,
+                self.name.clone(),
+                plan_response.response,
+            )
+        );
+        if true {
+            // self.orchestrator_step_execution(true).await?;
+            println!("开始进行执行");
+            return Ok(());
+        } else {
+            let user_plan = "";
+            if !user_plan.is_empty() {
+                self.state.plan = Plan::from_list_of_dicts_or_str(user_plan);
+                self.state.plan_str = user_plan.to_string();
+            }
 
             let mut context = self.thread_to_context(None)?;
-            context.push(LLMMessage::UserMessage(
+
+            context.push(LLMMessage::User(
                 UserMessage::new(
-                    UserContent::String(self.get_task_ledger_plan_prompt(self.team_description)?),
-                    self.name.clone(),
-                ),
+                    UserContent::String(user_plan.to_string()), 
+                    self.name.clone()
+                )
             ));
 
             plan_response = self.get_json_response(context, self.validate_plan_json);
 
-            self.state.plan = Plan::from_list_of_dicts_or_str(plan_response.steps);
-            self.state.plan_str = serde_json::to_string(&self.state.plan.as_ref().unwrap())?;
-
-            self.state.message_history.push(
-                ChatMessage::Text(
-                    TextMessage::new(
-                        plan_response.response,
-                         self.name.clone()
-                        )
-                    )
-            );
-        } else {
-            if true {
-                self.orchestrator_step_execution(true).await?;
-                return Ok(());
-            } else {
-                let user_plan = "";
-                if !user_plan.is_empty() {
-                    self.state.plan = Plan::from_list_of_dicts_or_str(user_plan);
-                    self.state.plan_str = user_plan.to_string();
-                }
-
-                let mut context = self.thread_to_context(None)?;
-
-                context.push(LLMMessage::UserMessage(
-                    UserMessage::new(
-                        UserContent::String(user_plan.to_string()), 
-                        self.name.clone()
-                    )
-                ));
-
-                plan_response = self.get_json_response(context, self.validate_plan_json);
-
-            }
-        }
-
-        if plan_response.needs_plan {
-            return Ok(());
-        } else {
-            self.select_next_speaker(
-                &self.name,
-                
-                self.state.message_history.clone()
-            ).await?;
-            return Ok(());
         }
     }
     
+    /*
     async fn orchestrator_step_execution(
         &mut self,
         first_step: bool,
@@ -355,7 +327,7 @@ impl Orchestrator {
             self.agent_execution_names,
         )?;
 
-        context.push(LLMMessage::UserMessage(
+        context.push(LLMMessage::User(
             UserMessage::new(
                 UserContent::String(progress_ledger_prompt), self.name.clone()
             ),
@@ -435,44 +407,45 @@ impl Orchestrator {
         // Ok(response)
         Ok(T::default())
     }
+    */
 
-    // 对话历史转为LLMMessage
+    // ChatMessage转为LLMMessage
     fn thread_to_context(&self, message:Option<Vec<ChatMessage>>) -> Result<Vec<LLMMessage>> {
 
-        let chat_messages = message.unwrap_or(&self.state.message_history);
+        let chat_messages = message.unwrap_or_else(|| self.state.message_history.clone());
 
         let mut context_messages:Vec<LLMMessage> = Vec::new();
         let date_today = Local::now().format("%Y-%m-%d").to_string();
 
+        // 获取系统信息
         if self.state.in_planning_mode {
-            let planning_prompt = format!("This is a planning step. The task is: {}", self.state.task);
-            context_messages.push(LLMMessage::SystemMessage(
+            let planning_prompt = self.get_orchestrator_system_message_planning()?;
+            context_messages.push(LLMMessage::System(
                 SystemMessage::new(planning_prompt),
             ));
         } else {
-            let execution_prompt = format!("This is a execution step. The task is: {}", self.state.task);
-            context_messages.push(LLMMessage::SystemMessage(
+            let execution_prompt = format!(r#"
+            You are a helpful AI assistant named Magentic-UI built by Microsoft Research AI Frontiers.
+            Your goal is to help the user with their request.
+            You can complete actions on the web, complete actions on behalf of the user, execute code, and more.
+            The browser the web_surfer accesses is also controlled by the user.
+            You have access to a team of agents who can help you answer questions and complete tasks.
+            The date today is: {}"#,
+            date_today);
+            context_messages.push(LLMMessage::System(
                 SystemMessage::new(execution_prompt),
             ));
         }
 
-        // 步骤 3: 使用辅助函数转换对话历史
-        // let converted_history = convert_agent_messages_to_llm_messages(
-        //     chat_messages,
-        //     &self.name,
-        //     is_multimodal,
-        // );
+        // 转换所有 ChatMessage 到 LLMMessage
+        let converted_messages = chat_history_to_llm_messages(&chat_messages)?;
+        context_messages.extend(converted_messages);
 
-        // 将转换后的历史记录追加到上下文中
-        // context_messages.extend(converted_history);
-
-        // 步骤 4: 返回最终构建完成的上下文
-        // context_messages
-
-        Ok(Vec::new())
+        Ok(context_messages)
 
     }
 
+    /* 
     async fn replan(&self,reason:String) -> Result<()> {
         self.state.in_planning_mode = true;
 
@@ -501,7 +474,7 @@ impl Orchestrator {
 
         let replan_prompt = self.get_task_ledger_replan_prompt(self.team_description.clone(), self.state.task.clone(), self.state.plan_str.clone())?;
 
-        context.push(LLMMessage::UserMessage(
+        context.push(LLMMessage::User(
             UserMessage::new(
                 UserContent::String(replan_prompt), 
                 self.name.clone()
@@ -557,6 +530,8 @@ impl Orchestrator {
         Ok(())
     }
 
+    */
+    
     fn get_progress_ledger_prompt(
         &self,
         task: String,
@@ -759,5 +734,120 @@ impl Orchestrator {
         let base_plan_prompt = self.get_task_ledger_plan_prompt(team)?;
         Ok(format!("{}\n\n{}", replan_intro, base_plan_prompt))
     }
+
+    pub fn get_orchestrator_system_message_planning(&self) -> Result<String> {
+        let date_today = Local::now().format("%A, %B %e, %Y").to_string();
+        let base_message = format!(
+            r#"
+            You are a helpful AI assistant named Magentic-UI built by Microsoft Research AI Frontiers.
+            Your goal is to help the user with their request.
+            You can complete actions on the web, complete actions on behalf of the user, execute code, and more.
+            You have access to a team of agents who can help you answer questions and complete tasks.
+            The browser the web_surfer accesses is also controlled by the user.
+            You are primarily a planner, and so you can devise a plan to do anything. 
+
+
+            The date today is: {}
+
+            First consider the following:
+
+            - is the user request missing information and can benefit from clarification? For instance, if the user asks "book a flight", the request is missing information about the destination, date and we should ask for clarification before proceeding. Do not ask to clarify more than once, after the first clarification, give a plan.
+            - is the user request something that can be answered from the context of the conversation history without executing code, or browsing the internet or executing other tools? If so, we should answer the question directly in as much detail as possible.
+            When you answer without a plan and your answer includes factual information, make sure to say whether the answer was found using online search or from your own internal knowledge.
+
+
+            Case 1: If the above is true, then we should provide our answer in the "response" field and set "needs_plan" to False.
+
+            Case 2: If the above is not true, then we should consider devising a plan for addressing the request. If you are unable to answer a request, always try to come up with a plan so that other agents can help you complete the task.
+
+
+            For Case 2:
+
+            You have access to the following team members that can help you address the request each with unique expertise:
+
+            {{team}}
+            Your plan should should be a sequence of steps that will complete the task."#,
+            date_today
+        );
+
+        let step_types_section = r#"
+            Each step should have a title and details field.
+
+            The title should be a short one sentence description of the step.
+
+            The details should be a detailed description of the step. The details should be concise and directly describe the action to be taken.
+            The details should start with a brief recap of the title. We then follow it with a new line. We then add any additional details without repeating information from the title. We should be concise but mention all crucial details to allow the human to verify the step."#;
+        
+        let examples_section = r#"
+            Example 1:
+
+            User request: "Report back the menus of three restaurants near the zipcode 98052"
+
+            Step 1:
+            - title: "Locate the menu of the first restaurant"
+            - details: "Locate the menu of the first restaurant. \n Search for highly-rated restaurants in the 98052 area using Bing, select one with good reviews and an accessible menu, then extract and format the menu information for reporting."
+            - agent_name: "web_surfer"
+
+            Step 2:
+            - title: "Locate the menu of the second restaurant"
+            - details: "Locate the menu of the second restaurant. \n After excluding the first restaurant, search for another well-reviewed establishment in 98052, ensuring it has a different cuisine type for variety, then collect and format its menu information."
+            - agent_name: "web_surfer"
+
+            Step 3:
+            - title: "Locate the menu of the third restaurant"
+            - details: "Locate the menu of the third restaurant. \n Building on the previous searches but excluding the first two restaurants, find a third establishment with a distinct cuisine type, verify its menu is available online, and compile the menu details."
+            - agent_name: "web_surfer"
+
+            Example 2:
+
+            User request: "Execute the starter code for the autogen repo"
+
+            Step 1:
+            - title: "Locate the starter code for the autogen repo"
+            - details: "Locate the starter code for the autogen repo. \n Search for the official AutoGen repository on GitHub, navigate to their examples or getting started section, and identify the recommended starter code for new users."
+            - agent_name: "web_surfer"
+
+            Step 2:
+            - title: "Execute the starter code for the autogen repo"
+            - details: "Execute the starter code for the autogen repo. \n Set up the Python environment with the correct dependencies, ensure all required packages are installed at their specified versions, and run the starter code while capturing any output or errors."
+            - agent_name: "coder_agent"
+
+
+            Example 3:
+
+            User request: "On which social media platform does Autogen have the most followers?"
+
+            Step 1:
+            - title: "Find all social media platforms that Autogen is on"
+            - details: "Find all social media platforms that Autogen is on. \n Search for AutoGen's official presence across major platforms like GitHub, Twitter, LinkedIn, and others, then compile a comprehensive list of their verified accounts."
+            - agent_name: "web_surfer"
+
+            Step 2:
+            - title: "Find the number of followers for each social media platform"
+            - details: "Find the number of followers for each social media platform. \n For each platform identified, visit AutoGen's official profile and record their current follower count, ensuring to note the date of collection for accuracy."
+            - agent_name: "web_surfer"
+
+            Step 3:
+            - title: "Find the number of followers for the remaining social media platform that Autogen is on"
+            - details: "Find the number of followers for the remaining social media platforms. \n Visit the remaining platforms and record their follower counts."
+            - agent_name: "web_surfer"
+
+
+            Example 4:
+            User request: "Can you paraphrase the following sentence: 'The quick brown fox jumps over the lazy dog'"
+
+            You should not provide a plan for this request. Instead, just answer the question directly.
+
+
+            Helpful tips:
+            - If the plan needs information from the user, try to get that information before creating the plan.
+            - When creating the plan you only need to add a step to the plan if it requires a different agent to be completed, or if the step is very complicated and can be split into two steps.
+            - Remember, there is no requirement to involve all team members -- a team member's particular expertise may not be needed for this task.
+            - Aim for a plan with the least number of steps possible.
+            - Use a search engine or platform to find the information you need. For instance, if you want to look up flight prices, use a flight search engine like Bing Flights. However, your final answer should not stop with a Bing search only.
+            - If there are images attached to the request, use them to help you complete the task and describe them to the other agents in the plan.
+        "#;
+        Ok(base_message + step_types_section + examples_section)
+    } 
 
 }
