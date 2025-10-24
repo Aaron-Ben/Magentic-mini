@@ -11,7 +11,7 @@ const TOP_NO_LABEL_ZONE: i32 = 20;
 
 // Note: You need to provide a path to a TTF font file. For example, download DejaVuSans.ttf and use include_bytes!.
 // For this code to compile, replace the path below with a valid font file path.
-const FONT_DATA: &[u8] = include_bytes!("../../../dejavu-sans.book.ttf");
+const FONT_DATA: &[u8] = include_bytes!("../../../../dejavu-sans.book.ttf");
 
 #[derive(Debug)]
 pub struct PageState {

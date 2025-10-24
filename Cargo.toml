@@ -53,4 +53,5 @@ features = ["extension-module"]
 
 [lib]
 name = "markitdown"
+path = "backend/src/lib.rs"
 crate-type = ["cdylib"]
