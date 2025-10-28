@@ -1,0 +1,4 @@
+pdfplumber
+langchain-core
+fastapi[all]
+uvicorn
