@@ -38,7 +38,7 @@ impl DocumentProcessor {
         }
 
         // 分割文档
-        // let chucks = sel
+        let chucks = self.split_document(&documents).await?;
 
         // 添加到向量数据库中
 
@@ -48,12 +48,11 @@ impl DocumentProcessor {
     #[allow(dead_code)]
     async fn split_document(&self, documents: &[Document]) -> Result<Vec<Document>> {
         let merged_doc = self.merge_documents(documents);
-        let split_point = self.get_split_points(merged_doc.content.as_str()).await?;
-        let _text_chuck = self.split_by_points(merged_doc.content.as_str(), split_point).await?;
+        let split_points = self.get_split_points(merged_doc.content.as_str(), &["\n\n"]).await?;
+        let _text_chuck = self.split_by_points(merged_doc.content.as_str(), &split_points).await?;
         unimplemented!();
     }
 
-    #[allow(dead_code)]
     fn merge_documents(&self, documents: &[Document]) -> Document {
         let content = documents
             .iter()
@@ -71,35 +70,43 @@ impl DocumentProcessor {
         }
     }
 
-    #[allow(dead_code)]
-    async fn get_split_points(&self, _text: &str) -> Result<Vec<String>> {
+    async fn get_split_points(&self, text: &str, split_points: &[&str]) -> Result<Vec<String>> {
+        
         unimplemented!();
     }
 
-    #[allow(dead_code)]
-    async fn split_by_points(&self, _text: &str, _points: Vec<String>) -> Result<Vec<String>> {
-        unimplemented!();
+    async fn split_by_points(&self, text: &str, split_points: &[&str]) -> Result<Vec<String>> {
+        let mut chunks = Vec::new();
+        let mut current_pos = 0;
+
+        for &point in split_points {
+            if let Some(pos) = text[current_pos..].find(point) {
+                let abs_pos = current_pos + pos;
+
+                if abs_pos > current_pos {
+                    let chunk = text[current_pos..abs_pos].trim();
+                    if !chunk.is_empty() {
+                        chunks.push(chunk.to_string());
+                    }
+                }
+
+                current_pos = abs_pos;
+            }
+        }
+        if current_pos < text.len() {
+            let chuck = text[current_pos..].trim();
+            if !chuck.is_empty() {
+                chunks.push(chuck.to_string());
+            }
+        }
+
+        Ok(chunks)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn test_process_document() {
-        // 确保 Python 服务已在 http://localhost:8001 运行
-        let py_client = PyClient::new("http://127.0.0.1:8001");
-        let document_processor = DocumentProcessor::new(py_client);
-        
-        // 请替换为实际存在的 PDF 文件路径
-        let test_pdf_path = "/Users/xuenai/Downloads/djcftlqw.pdf";
-        
-        match document_processor.process_document(test_pdf_path).await {
-            Ok(_) => println!("✅ PDF 处理成功！"),
-            Err(e) => println!("❌ PDF 处理失败: {:?}", e),
-        }
-    }
 
     #[tokio::test]
     async fn test_py_client_load_pdf() {       
